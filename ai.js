@@ -7,14 +7,24 @@ function buildSystemPrompt(config, knowledge) {
   return [
     `Kamu adalah asisten customer service untuk ${config.businessName}.`,
     'Jawab dalam bahasa Indonesia, singkat, dan ramah seperti admin muda yang',
-    'senang membantu — bukan seperti balasan mesin atau surat resmi.',
+    'senang membantu dan hangat — bukan seperti balasan mesin atau surat resmi.',
     '',
     'Gaya balasan:',
     '- Sapa seperlunya, jangan bertele-tele. Langsung ke jawabannya.',
-    '- Pakai emoji secukupnya: 1 sampai 3 per balasan, di tempat yang wajar.',
-    '  Emoji bikin balasan terasa hangat, tapi kebanyakan malah seperti spam.',
+    '- Jangan cuek. Tanggapi dulu apa yang pelanggan bilang dengan hangat,',
+    '  baru masuk ke isi jawabannya. Kalau dia mengirim gambar, komentari',
+    '  gambarnya sebentar sebelum menjawab.',
+    '- Pakai emoji 2 sampai 4 per balasan, dan usahakan minimal satu. Emoji',
+    '  yang bikin balasan terasa hidup, bukan yang sekadar menempel di akhir.',
     '- Jangan taruh emoji di tengah daftar harga, angka, atau langkah teknis —',
     '  di situ emoji bikin susah dibaca.',
+    '- Pakai kata yang ditarik, bukan dipotong. "yaa", bukan "ya". "sip" atau',
+    '  "oke", bukan "ok". "gak", bukan "tidak". Tapi jangan berlebihan sampai',
+    '  hurufnya jadi banyak sekali.',
+    '- JANGAN menutup kalimat atau baris dengan titik. Tanpa titik terasa',
+    '  akrab, dengan titik terasa seperti surat resmi. Tanda tanya dan tanda',
+    '  seru tetap boleh dipakai. Titik tetap dipakai di dalam angka',
+    '  (Rp75.000) dan di penomoran daftar (1. 2. 3.) — yang itu jangan dihapus.',
     '- Boleh memanggil pelanggan dengan "kak" atau "kamu"; pilih yang paling',
     '  natural, dan jangan berganti-ganti dalam satu percakapan.',
     '- Kabar baik (stok ada, bisa dikirim) disampaikan dengan senang. Kabar',
@@ -33,6 +43,28 @@ function buildSystemPrompt(config, knowledge) {
     knowledge,
     '---',
   ].join('\n')
+}
+
+/**
+ * Buang titik di ujung kalimat. Prompt sudah melarangnya, tapi model kecil
+ * dan gratis tetap menaruhnya — aturan gaya harus dijamin kode.
+ *
+ * Yang TIDAK boleh dibuang: titik di dalam angka ("Totalnya Rp75.000." hanya
+ * kehilangan titik terakhirnya) dan titik penomoran ("1." yang kehilangan
+ * titiknya berubah jadi angka menggantung).
+ */
+export function dropTrailingPeriods(text) {
+  return String(text ?? '')
+    .split('\n')
+    .map((line) => {
+      const m = line.match(/^(.*\S)\.(\s*)$/)
+      if (!m) return line
+      const [, body, space] = m
+      if (body.endsWith('.')) return line // elipsis "..."
+      if (/^\d+$/.test(body)) return line // penomoran "1." "2."
+      return body + space
+    })
+    .join('\n')
 }
 
 export function createAI({ config, knowledge, fetchImpl = fetch }) {
@@ -116,7 +148,8 @@ export function createAI({ config, knowledge, fetchImpl = fetch }) {
       // penanda itu ikut terkirim ke pelanggan dan pemilik tidak pernah
       // diberi tahu ada pertanyaan yang nyangkut.
       const escalated = raw.includes(ESCALATE)
-      const reply = escalated ? raw.replace(/\*{0,2}\[\[ESCALATE\]\]\*{0,2}/g, '').trim() : raw
+      const bersih = escalated ? raw.replace(/\*{0,2}\[\[ESCALATE\]\]\*{0,2}/g, '').trim() : raw
+      const reply = dropTrailingPeriods(bersih)
 
       history.push({ role: 'assistant', content: reply })
       trim(history)

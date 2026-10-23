@@ -41,14 +41,32 @@ test('penanda [[ESCALATE]] memicu escalated dan dibuang dari teks', async () => 
   assert.equal(res.failed, false, 'balasan normal bukan kegagalan sistem')
 })
 
-test('system prompt memuat aturan gaya balasan yang ramah dan beremoji', async () => {
+// Helper: system prompt yang benar-benar dikirim ke provider.
+async function systemOf() {
   const { impl, calls } = fakeFetch('halo')
   const ai = createAI({ config, knowledge: 'x', fetchImpl: impl })
   await ai.ask({ jid: CHAT, text: 'halo' })
-  const system = calls[0].messages.find(m => m.role === 'system').content
+  return calls[0].messages.find(m => m.role === 'system').content
+}
+
+test('system prompt meminta nada hangat dengan emoji yang tidak pelit', async () => {
+  const system = await systemOf()
   assert.match(system, /ramah/i, 'nada ramah harus diminta lewat prompt, bukan diserahkan ke model')
+  assert.match(system, /hangat/i, 'pelanggan mengeluh botnya cuek — kehangatan harus diminta eksplisit')
   assert.match(system, /emoji/i, 'izin pakai emoji harus eksplisit')
-  assert.match(system, /1 sampai 3|1-3/, 'tanpa batas jumlah, model kecil akan membanjiri emoji')
+  assert.match(system, /2 sampai 4|2-4/, 'batas lama 1-3 terbukti masih terasa kering di pemakaian nyata')
+})
+
+test('system prompt melarang titik di akhir kalimat, tanpa merusak harga dan penomoran', async () => {
+  const system = await systemOf()
+  assert.match(system, /titik/i, 'aturan tanpa titik akhir harus eksplisit')
+  assert.match(system, /angka|Rp\s?75\.000/, 'titik di dalam angka harus disebut sebagai pengecualian')
+  assert.match(system, /penomoran|daftar|1\./, 'titik penomoran juga pengecualian; kalau tidak, daftar jadi "1 2 3"')
+})
+
+test('system prompt meminta kata yang ditarik, bukan dipotong', async () => {
+  const system = await systemOf()
+  assert.match(system, /yaa/, 'permintaan langsung pemilik: "ya" harus jadi "yaa"')
 })
 
 test('riwayat dipotong ke 20 pesan terakhir', async () => {
@@ -133,6 +151,38 @@ test('balasan yang hanya berisi penanda tidak dikirim kosong', async () => {
   const res = await ai.ask({ jid: CHAT, text: 'halo' })
   assert.equal(res.escalated, true)
   assert.equal(res.reply, '')
+})
+
+test('titik di akhir kalimat dibuang dari balasan', async () => {
+  // Prompt saja tidak cukup: model kecil dan gratis tetap menaruh titik.
+  // Aturan gaya harus dijamin kode, bukan diserahkan ke model.
+  const ai = createAI({ config, knowledge: 'x', fetchImpl: fakeFetch('Halo kak, stoknya ada.').impl })
+  const res = await ai.ask({ jid: CHAT, text: 'halo' })
+  assert.equal(res.reply, 'Halo kak, stoknya ada')
+})
+
+test('titik dibuang di setiap baris, bukan cuma di akhir balasan', async () => {
+  const ai = createAI({ config, knowledge: 'x', fetchImpl: fakeFetch('Bisa kak.\nKirim alamatnya ya.').impl })
+  const res = await ai.ask({ jid: CHAT, text: 'halo' })
+  assert.equal(res.reply, 'Bisa kak\nKirim alamatnya ya')
+})
+
+test('harga yang berakhir titik tetap utuh', async () => {
+  const ai = createAI({ config, knowledge: 'x', fetchImpl: fakeFetch('Totalnya Rp75.000.').impl })
+  const res = await ai.ask({ jid: CHAT, text: 'berapa?' })
+  assert.equal(res.reply, 'Totalnya Rp75.000', 'yang dibuang titik akhir kalimatnya, bukan titik di dalam harganya')
+})
+
+test('penomoran "1." tidak ikut kehilangan titiknya', async () => {
+  const ai = createAI({ config, knowledge: 'x', fetchImpl: fakeFetch('Caranya:\n1.\n2.').impl })
+  const res = await ai.ask({ jid: CHAT, text: 'gimana?' })
+  assert.equal(res.reply, 'Caranya:\n1.\n2.', '"1." yang kehilangan titik berubah jadi angka yang menggantung')
+})
+
+test('tanda tanya, tanda seru, dan elipsis tidak ikut dibuang', async () => {
+  const ai = createAI({ config, knowledge: 'x', fetchImpl: fakeFetch('Mau aku bantu siapkan? 😊\nSiap kak!\nAduh...').impl })
+  const res = await ai.ask({ jid: CHAT, text: 'halo' })
+  assert.equal(res.reply, 'Mau aku bantu siapkan? 😊\nSiap kak!\nAduh...')
 })
 
 test('base64 tidak tertinggal di riwayat', async () => {

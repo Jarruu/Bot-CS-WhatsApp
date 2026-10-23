@@ -41,6 +41,16 @@ test('penanda [[ESCALATE]] memicu escalated dan dibuang dari teks', async () => 
   assert.equal(res.failed, false, 'balasan normal bukan kegagalan sistem')
 })
 
+test('system prompt memuat aturan gaya balasan yang ramah dan beremoji', async () => {
+  const { impl, calls } = fakeFetch('halo')
+  const ai = createAI({ config, knowledge: 'x', fetchImpl: impl })
+  await ai.ask({ jid: CHAT, text: 'halo' })
+  const system = calls[0].messages.find(m => m.role === 'system').content
+  assert.match(system, /ramah/i, 'nada ramah harus diminta lewat prompt, bukan diserahkan ke model')
+  assert.match(system, /emoji/i, 'izin pakai emoji harus eksplisit')
+  assert.match(system, /1 sampai 3|1-3/, 'tanpa batas jumlah, model kecil akan membanjiri emoji')
+})
+
 test('riwayat dipotong ke 20 pesan terakhir', async () => {
   const { impl, calls } = fakeFetch('ok')
   const ai = createAI({ config, knowledge: 'x', fetchImpl: impl })

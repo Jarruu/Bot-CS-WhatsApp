@@ -49,9 +49,9 @@ const queue = createQueue()
 const takeover = createTakeover()
 
 const OWNER_JID = `${config.ownerNumber}@s.whatsapp.net`
-const EMPTY_REPLY = 'Maaf, aku belum bisa menjawab itu. Aku tanyakan dulu ke admin ya.'
-const IMAGE_TOO_BIG = 'Gambarnya kegedean jadi belum bisa aku buka. Coba kirim ulang dengan ukuran lebih kecil ya.'
-const IMAGE_FAILED = 'Gambarnya gagal aku buka. Coba kirim ulang ya.'
+const EMPTY_REPLY = 'Maaf ya, aku belum bisa jawab itu 🙏 Aku tanyakan dulu ke admin, nanti dibalas ya.'
+const IMAGE_TOO_BIG = 'Gambarnya kegedean jadi belum bisa aku buka 📷 Coba kirim ulang dengan ukuran lebih kecil ya.'
+const IMAGE_FAILED = 'Gambarnya gagal aku buka 📷 Coba kirim ulang ya.'
 const FAILURE_NOTICE_INTERVAL_MS = 15 * 60 * 1000
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -183,7 +183,7 @@ async function processMessage(jid, items) {
 
   let body = (reply ?? '').trim() || EMPTY_REPLY
   if (config.offlineNotice && outsideHours()) {
-    body += `\n\n(Admin sedang offline. Jam operasional ${config.hours.open}.00–${config.hours.close}.00, tapi pesanmu tetap kami baca.)`
+    body += `\n\n⏰ Admin sedang offline. Jam operasional ${config.hours.open}.00–${config.hours.close}.00 — pesanmu tetap kami baca ya.`
   }
 
   const chunks = chunkText(body)

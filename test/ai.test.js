@@ -78,6 +78,30 @@ test('gambar dikirim sebagai data URI, dan memakai model bervisi', async () => {
   assert.equal(calls[0].model, 'model-gambar')
 })
 
+test('riwayat bisa disimpan lalu dipulihkan setelah bot restart', async () => {
+  const { impl } = fakeFetch('jawaban')
+  const ai = createAI({ config, knowledge: 'KB', fetchImpl: impl })
+  await ai.ask({ jid: CHAT, text: 'halo' })
+  const saved = ai.snapshot()
+  assert.deepEqual(saved[CHAT].map(m => m.content), ['halo', 'jawaban'])
+
+  const { impl: impl2, calls } = fakeFetch('lanjutan')
+  const ai2 = createAI({ config, knowledge: 'KB', fetchImpl: impl2 })
+  ai2.restore(saved)
+  await ai2.ask({ jid: CHAT, text: 'lanjut' })
+  assert.deepEqual(
+    calls[0].messages.filter(m => m.role !== 'system').map(m => m.content),
+    ['halo', 'jawaban', 'lanjut'],
+    'percakapan nyambung, pelanggan tidak perlu mengulang dari awal',
+  )
+})
+
+test('riwayat rusak di disk tidak membuat bot gagal start', () => {
+  const ai = createAI({ config, knowledge: 'KB', fetchImpl: fakeFetch('x').impl })
+  ai.restore({ [CHAT]: 'bukan array', 'lain@s.whatsapp.net': null })
+  assert.deepEqual(ai.snapshot(), {})
+})
+
 test('base64 tidak tertinggal di riwayat', async () => {
   const { impl, calls } = fakeFetch('ok')
   const ai = createAI({ config, knowledge: 'x', fetchImpl: impl })

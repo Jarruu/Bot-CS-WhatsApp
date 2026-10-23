@@ -103,5 +103,22 @@ export function createAI({ config, knowledge, fetchImpl = fetch }) {
 
       return { reply, escalated, failed: false }
     },
+
+    /**
+     * Riwayat untuk ditulis ke disk. Berisi teks saja — gambar sudah
+     * dikurangi jadi penanda sebelum masuk sini, jadi base64 tidak pernah
+     * ikut tersimpan.
+     */
+    snapshot() {
+      return Object.fromEntries(histories)
+    },
+
+    /** Pulihkan setelah restart. Isi yang rusak diabaikan, bukan dilempar. */
+    restore(data) {
+      for (const [jid, list] of Object.entries(data ?? {})) {
+        if (!Array.isArray(list)) continue
+        histories.set(jid, list.slice(-MAX_HISTORY))
+      }
+    },
   }
 }

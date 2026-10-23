@@ -82,6 +82,22 @@ test('debouncer menggabungkan pesan beruntun jadi satu flush', async () => {
   assert.deepEqual(flushes[0][1].map(i => i.text), ['a', 'b', 'c'])
 })
 
+test('jendela debounce mundur selama pelanggan masih mengetik', async () => {
+  // Bedanya dengan tes di atas: di sini jarak antar pesan mendekati batas
+  // jendela, bukan sepersekian milidetik. Kalau timer tidak diulang tiap
+  // pesan, jendela habis di tengah dan pelanggan dapat dua balasan.
+  const flushes = []
+  const d = createDebouncer({ waitMs: 40, onFlush: (jid, items) => flushes.push(items) })
+  d.add(CHAT, { text: 'a' })
+  await new Promise(r => setTimeout(r, 25))
+  d.add(CHAT, { text: 'b' })
+  await new Promise(r => setTimeout(r, 25))
+  d.add(CHAT, { text: 'c' })
+  await new Promise(r => setTimeout(r, 80))
+  assert.equal(flushes.length, 1)
+  assert.deepEqual(flushes[0].map(i => i.text), ['a', 'b', 'c'])
+})
+
 test('rate limiter mengizinkan sampai batas lalu memblokir', () => {
   const rl = createRateLimiter({ max: 3, windowMs: 60_000, cooldownMs: 300_000 })
   for (let i = 0; i < 3; i++) assert.equal(rl.check(CHAT), true, `pesan ke-${i + 1}`)

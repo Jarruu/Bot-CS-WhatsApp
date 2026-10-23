@@ -61,7 +61,7 @@ supaya tetap hidup saat laptopmu mati.
 | `OFFLINE_NOTICE` | `true` | Tambah baris "admin offline" di luar jam kerja |
 | `ACCESS_MODE` | `PUBLIC` | `PUBLIC` atau `WHITELIST` |
 | `WHITELIST` | — | Nomor dipisah koma, dipakai kalau `ACCESS_MODE=WHITELIST` |
-| `DEBOUNCE_SEC` | `3` | Jeda mengumpulkan pesan beruntun |
+| `DEBOUNCE_SEC` | `8` | Jeda mengumpulkan pesan beruntun jadi satu balasan |
 | `RATE_IN_MAX` | `20` | Batas pesan masuk per nomor |
 | `RATE_IN_WINDOW_SEC` | `60` | Jendela waktu batas masuk |
 | `RATE_IN_COOLDOWN_MIN` | `5` | Lama diam setelah batas masuk terlampaui |

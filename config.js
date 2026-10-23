@@ -93,7 +93,12 @@ export function loadConfig(env = process.env) {
         .filter(Boolean),
     },
     limits: {
-      debounceSec: num(env, 'DEBOUNCE_SEC', 3),
+      // 8 detik, bukan 3. Jendela 3 detik terbukti kepotong di pemakaian
+      // sungguhan: pelanggan mengirim "kamu menjual apa?" lalu "apa aku boleh
+      // tau?" dengan selisih 3,8 detik, dan bot menjawab dua kali. Mengetik
+      // satu kalimat lanjutan itu perlu beberapa detik, jadi jendelanya harus
+      // cukup panjang untuk menampungnya.
+      debounceSec: num(env, 'DEBOUNCE_SEC', 8),
       rateInMax: positive(env, 'RATE_IN_MAX', 20),
       rateInWindowSec: positive(env, 'RATE_IN_WINDOW_SEC', 60),
       rateInCooldownMin: num(env, 'RATE_IN_COOLDOWN_MIN', 5),

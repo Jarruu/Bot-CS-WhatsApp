@@ -27,7 +27,7 @@ test('default terisi benar', () => {
 test('batas dan debounce punya default yang benar', () => {
   const { limits } = loadConfig(FULL)
   assert.deepEqual(limits, {
-    debounceSec: 3, rateInMax: 20, rateInWindowSec: 60, rateInCooldownMin: 5,
+    debounceSec: 8, rateInMax: 20, rateInWindowSec: 60, rateInCooldownMin: 5,
     rateOutMax: 15, rateOutWindowSec: 60, chunkDelaySec: 1, maxImageMb: 5,
   })
 })

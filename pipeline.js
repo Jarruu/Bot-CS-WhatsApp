@@ -1,16 +1,45 @@
 // Seluruh isi file ini murni: tidak menyentuh jaringan maupun WhatsApp,
 // supaya filter, batas, dan antrian bisa diuji tanpa koneksi sungguhan.
 
+// Baileys TIDAK membuka bungkus ini sebelum menyerahkan pesan ke kita, jadi
+// foto sekali-lihat dan chat yang menghilang sampai ke sini masih terbungkus.
+// Daftarnya disamakan dengan normalizeMessageContent milik Baileys; kalau
+// Baileys menambah bungkus baru, tambahkan di sini juga.
+const WRAPPERS = [
+  'ephemeralMessage',
+  'viewOnceMessage',
+  'documentWithCaptionMessage',
+  'viewOnceMessageV2',
+  'viewOnceMessageV2Extension',
+  'editedMessage',
+  'associatedChildMessage',
+  'groupStatusMessage',
+  'groupStatusMessageV2',
+]
+
+/** Buka bungkus sampai ketemu isi aslinya. */
+function unwrap(message) {
+  let content = message
+  // Batas 5 putaran sama dengan Baileys: cukup untuk bungkus bertingkat, dan
+  // tidak bisa berputar selamanya kalau datanya aneh.
+  for (let i = 0; i < 5 && content; i++) {
+    const inner = WRAPPERS.map((key) => content[key]).find(Boolean)
+    if (!inner) break
+    content = inner.message
+  }
+  return content
+}
+
 /** Teks dari pesan, atau null kalau memang tidak ada teks. */
 export function extractText(msg) {
-  const m = msg?.message
+  const m = unwrap(msg?.message)
   if (!m) return null
   return m.conversation ?? m.extendedTextMessage?.text ?? m.imageMessage?.caption ?? null
 }
 
 /** Node gambar dari pesan, atau null. Node-nya dipakai index.js untuk unduh. */
 export function extractImage(msg) {
-  return msg?.message?.imageMessage ?? null
+  return unwrap(msg?.message)?.imageMessage ?? null
 }
 
 /**

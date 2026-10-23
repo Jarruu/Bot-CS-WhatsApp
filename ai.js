@@ -94,9 +94,13 @@ export function createAI({ config, knowledge, fetchImpl = fetch }) {
         return { reply: FALLBACK, escalated: true, failed: true }
       }
 
-      const trimmed = raw.trimStart()
-      const escalated = trimmed.startsWith(ESCALATE)
-      const reply = escalated ? trimmed.slice(ESCALATE.length).trimStart() : raw
+      // Penanda bisa datang di mana saja: model kecil dan gratis rutin
+      // menambah kalimat pembuka atau menebalkan penandanya. Yang dicari
+      // keberadaannya, bukan posisinya — kalau hanya awal balasan yang dicek,
+      // penanda itu ikut terkirim ke pelanggan dan pemilik tidak pernah
+      // diberi tahu ada pertanyaan yang nyangkut.
+      const escalated = raw.includes(ESCALATE)
+      const reply = escalated ? raw.replace(/\*{0,2}\[\[ESCALATE\]\]\*{0,2}/g, '').trim() : raw
 
       history.push({ role: 'assistant', content: reply })
       trim(history)

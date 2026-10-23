@@ -44,6 +44,33 @@ test('chunkText membagi teks panjang tanpa kehilangan karakter', () => {
   assert.ok(parts.every(p => p.length > 0 && p.length <= 4000))
 })
 
+test('gambar sekali-lihat dan chat menghilang tetap terbaca', () => {
+  // Baileys TIDAK membuka bungkus ini sebelum menyerahkan pesan ke kita.
+  // Tanpa dibuka, foto sekali-lihat jadi "pesan tak didukung": pelanggan
+  // tidak dapat balasan apa pun dan pemilik tidak dapat notifikasi apa pun.
+  const img = { imageMessage: { mimetype: 'image/jpeg', fileLength: 10 } }
+  for (const bungkus of ['viewOnceMessage', 'viewOnceMessageV2', 'viewOnceMessageV2Extension', 'ephemeralMessage', 'documentWithCaptionMessage']) {
+    assert.equal(
+      extractImage({ message: { [bungkus]: { message: img } } })?.mimetype,
+      'image/jpeg',
+      bungkus,
+    )
+  }
+  assert.equal(
+    extractText({ message: { viewOnceMessageV2: { message: { imageMessage: { caption: 'ini apa' } } } } }),
+    'ini apa',
+  )
+  assert.equal(
+    shouldIgnore({ key: { remoteJid: CHAT }, message: { viewOnceMessageV2: { message: img } } }),
+    false,
+  )
+  // yang memang tak didukung tetap tak didukung
+  assert.equal(
+    shouldIgnore({ key: { remoteJid: CHAT }, message: { viewOnceMessageV2: { message: { stickerMessage: {} } } } }),
+    true,
+  )
+})
+
 test('debouncer menggabungkan pesan beruntun jadi satu flush', async () => {
   const flushes = []
   const d = createDebouncer({ waitMs: 20, onFlush: (jid, items) => flushes.push([jid, items]) })

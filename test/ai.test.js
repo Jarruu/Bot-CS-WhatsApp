@@ -102,6 +102,29 @@ test('riwayat rusak di disk tidak membuat bot gagal start', () => {
   assert.deepEqual(ai.snapshot(), {})
 })
 
+test('penanda eskalasi tetap terbaca walau tidak di awal balasan', async () => {
+  // Model kecil dan gratis rutin menambah pembuka atau menebalkan penandanya.
+  // Kalau hanya awal balasan yang dicek, penanda itu ikut terkirim ke
+  // pelanggan DAN pemilik tidak pernah diberi tahu ada pertanyaan nyangkut.
+  for (const mentah of [
+    '**[[ESCALATE]]** Maaf, aku tanyakan dulu ke admin ya.',
+    'Baik, aku teruskan ke admin dulu. [[ESCALATE]]',
+  ]) {
+    const ai = createAI({ config, knowledge: 'x', fetchImpl: fakeFetch(mentah).impl })
+    const res = await ai.ask({ jid: CHAT, text: 'ada diskon?' })
+    assert.equal(res.escalated, true, mentah)
+    assert.equal(res.reply.includes('ESCALATE'), false, `penanda bocor ke pelanggan: ${mentah}`)
+    assert.ok(res.reply.length > 0, `balasan jadi kosong: ${mentah}`)
+  }
+})
+
+test('balasan yang hanya berisi penanda tidak dikirim kosong', async () => {
+  const ai = createAI({ config, knowledge: 'x', fetchImpl: fakeFetch('[[ESCALATE]]').impl })
+  const res = await ai.ask({ jid: CHAT, text: 'halo' })
+  assert.equal(res.escalated, true)
+  assert.equal(res.reply, '')
+})
+
 test('base64 tidak tertinggal di riwayat', async () => {
   const { impl, calls } = fakeFetch('ok')
   const ai = createAI({ config, knowledge: 'x', fetchImpl: impl })

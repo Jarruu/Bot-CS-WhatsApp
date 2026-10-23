@@ -2,7 +2,7 @@
 // diuji di sini, semuanya didelegasikan ke config.js, pipeline.js, dan ai.js.
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { makeWASocket, useMultiFileAuthState, DisconnectReason, downloadMediaMessage } from '@whiskeysockets/baileys'
+import { makeWASocket, useMultiFileAuthState, DisconnectReason, downloadMediaMessage, DEFAULT_CONNECTION_CONFIG } from '@whiskeysockets/baileys'
 import qrcode from 'qrcode-terminal'
 
 import { loadConfig, loadKnowledge } from './config.js'
@@ -11,6 +11,10 @@ import {
   extractText, extractImage, shouldIgnore, chunkText,
   createDebouncer, createRateLimiter, createSendGate, createQueue, createTakeover,
 } from './pipeline.js'
+
+// Baileys butuh logger di dua tempat, dan objeknya harus sama. Socket tidak
+// menyimpan logger-nya, jadi ambil dari default resminya.
+const LOGGER = DEFAULT_CONNECTION_CONFIG.logger
 
 // ---- Konfigurasi dulu, sebelum menyentuh Baileys -------------------------
 // Kalau .env kurang atau knowledge.md kosong, bot harus mati di sini dengan
@@ -95,7 +99,21 @@ function outsideHours() {
 
 async function send(jid, text) {
   await sendGate.waitTurn()
-  const sent = await sock.sendMessage(jid, { text })
+  let sent
+  try {
+    sent = await sock.sendMessage(jid, { text })
+  } catch (err) {
+    // Koneksi bisa putus tepat di detik pengiriman. Sekali coba lagi: balasan
+    // yang hilang berarti pelanggan menunggu selamanya tanpa ada yang tahu.
+    console.error(`gagal mengirim, mencoba sekali lagi: ${err.message}`)
+    await sendGate.waitTurn()
+    try {
+      sent = await sock.sendMessage(jid, { text })
+    } catch (err2) {
+      log({ jid, dir: 'out', text, adaGambar: false, eskalasi: false, sebab: 'kirim-gagal' })
+      throw err2
+    }
+  }
   takeover.noteSent(sent?.key?.id)
   log({ jid, dir: 'out', text, adaGambar: false, eskalasi: false, sebab: null })
   return sent
@@ -140,7 +158,11 @@ async function processMessage(jid, items) {
         withImage.msg,
         'buffer',
         {},
-        { reuploadRequest: sock.updateMediaMessage },
+        // `logger` wajib ada di sini. Kalau media-nya sudah kedaluwarsa
+        // (404/410), Baileys mencatat lewat ctx.logger SEBELUM memanggil
+        // reuploadRequest — tanpa logger, penyelamatan media kedaluwarsa itu
+        // mati dan yang muncul malah TypeError yang menyesatkan.
+        { reuploadRequest: sock.updateMediaMessage, logger: LOGGER },
       )
       image = { data: buffer, mimetype: withImage.image.mimetype ?? 'image/jpeg' }
     } catch (err) {
@@ -230,6 +252,7 @@ async function start() {
 
   sock = makeWASocket({
     auth: state,
+    logger: LOGGER,
     // Wajib false. Kalau bot menandai dirinya online, WhatsApp berhenti
     // mengirim push notification dan HP pemilik diam saat ada chat masuk —
     // padahal justru itu yang dibutuhkan untuk takeover manual.

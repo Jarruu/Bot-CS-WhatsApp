@@ -50,3 +50,40 @@ test('knowledge.md kosong atau hilang ditolak', () => {
   assert.throws(() => loadKnowledge(p), /kosong/)
   assert.throws(() => loadKnowledge(join(tmpdir(), 'tidak-ada-xyz.md')), /tidak ditemukan/)
 })
+
+test('ACCESS_MODE salah tulis ditolak, bukan diam-diam jadi PUBLIC', () => {
+  // Bot yang dikira terkunci tapi sebenarnya terbuka untuk semua orang itu
+  // kegagalan yang tidak akan pernah disadari pemiliknya.
+  for (const salah of ['whitelist', 'Whitelist', 'WHITE_LIST', 'publik', 'PUBLIK']) {
+    assert.throws(() => loadConfig({ ...FULL, ACCESS_MODE: salah }), /ACCESS_MODE/, salah)
+  }
+  assert.equal(loadConfig(FULL).access.mode, 'PUBLIC')
+  assert.equal(loadConfig({ ...FULL, ACCESS_MODE: 'WHITELIST' }).access.mode, 'WHITELIST')
+})
+
+test('nomor dibersihkan dari spasi, plus, dan tanda hubung', () => {
+  // Nomor bertanda plus bikin JID tidak sah, dan eskalasi yang gagal tidak
+  // akan pernah sampai ke pemilik — satu-satunya orang yang bisa menyadarinya.
+  const c = loadConfig({
+    ...FULL,
+    OWNER_NUMBER: '+62 812-3456-7890',
+    WHITELIST: ' +62 811 , 62812 ',
+  })
+  assert.equal(c.ownerNumber, '6281234567890')
+  assert.deepEqual(c.access.whitelist, ['62811', '62812'])
+})
+
+test('nomor yang tidak menyisakan satu digit pun ditolak', () => {
+  assert.throws(() => loadConfig({ ...FULL, OWNER_NUMBER: '+-- ' }), /OWNER_NUMBER/)
+})
+
+test('batas nol atau negatif ditolak, bukan bikin bot berputar tanpa henti', () => {
+  // Nilai 0 bikin send gate menunggu selamanya sambil membakar CPU: tidak ada
+  // timestamp yang pernah masuk, jadi tidak ada yang bisa kedaluwarsa. Bot
+  // kelihatan hidup tapi tidak pernah membalas siapa pun.
+  for (const key of ['RATE_OUT_MAX', 'RATE_IN_MAX', 'RATE_OUT_WINDOW_SEC', 'RATE_IN_WINDOW_SEC']) {
+    assert.throws(() => loadConfig({ ...FULL, [key]: '0' }), new RegExp(key), key)
+    assert.throws(() => loadConfig({ ...FULL, [key]: '-1' }), new RegExp(key), key)
+  }
+  assert.equal(loadConfig({ ...FULL, RATE_OUT_MAX: '1' }).limits.rateOutMax, 1)
+})

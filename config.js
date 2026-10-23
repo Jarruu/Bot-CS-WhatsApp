@@ -17,11 +17,27 @@ const num = (env, key, fallback) => {
   return n
 }
 
+/** Sama seperti num(), tapi menolak 0 dan angka negatif. */
+const positive = (env, key, fallback) => {
+  const n = num(env, key, fallback)
+  if (!(n > 0)) {
+    throw new Error(
+      `${key} harus lebih besar dari 0, tapi isinya "${env[key]}". ` +
+        'Nol bukan berarti "tanpa batas" — nilainya bikin bot berhenti membalas.',
+    )
+  }
+  return n
+}
+
 const bool = (env, key, fallback) => {
   const raw = env[key]
   if (raw === undefined || raw === '') return fallback
   return !['false', '0', 'no', 'off'].includes(String(raw).trim().toLowerCase())
 }
+
+/** WhatsApp memakai digit saja. "+62 812-345" bikin JID tidak sah dan
+ *  pesannya diam-diam tidak pernah sampai. */
+const digits = (raw) => String(raw ?? '').replace(/\D/g, '')
 
 /**
  * Membaca konfigurasi dari objek env yang diberikan, bukan langsung dari
@@ -36,6 +52,26 @@ export function loadConfig(env = process.env) {
     )
   }
 
+  const ownerNumber = digits(env.OWNER_NUMBER)
+  if (!ownerNumber) {
+    throw new Error(
+      `OWNER_NUMBER tidak berisi satu angka pun, isinya "${env.OWNER_NUMBER}". ` +
+        'Tulis nomor tanpa tanda plus, misal 62812xxxxxxx — kalau salah, ' +
+        'notifikasi eskalasi tidak akan pernah sampai ke kamu.',
+    )
+  }
+
+  // Nilai yang salah tulis tidak boleh diam-diam jatuh ke PUBLIC: pemilik
+  // yang mengira botnya terkunci padahal terbuka untuk semua orang tidak
+  // akan pernah menyadarinya.
+  const mode = str(env, 'ACCESS_MODE', 'PUBLIC')
+  if (!['PUBLIC', 'WHITELIST'].includes(mode)) {
+    throw new Error(
+      `ACCESS_MODE harus tepat "PUBLIC" atau "WHITELIST", tapi isinya "${mode}". ` +
+        'Pilih salah satu — huruf besar semua.',
+    )
+  }
+
   return {
     aiBaseUrl: str(env, 'AI_BASE_URL', 'https://openrouter.ai/api/v1'),
     aiApiKey: env.AI_API_KEY,
@@ -43,26 +79,26 @@ export function loadConfig(env = process.env) {
     // Kosong berarti pakai model yang sama untuk teks dan gambar.
     aiVisionModel: str(env, 'AI_VISION_MODEL', env.AI_MODEL),
     businessName: env.BUSINESS_NAME,
-    ownerNumber: env.OWNER_NUMBER,
+    ownerNumber,
     hours: {
       open: num(env, 'OPEN_HOUR', 8),
       close: num(env, 'CLOSE_HOUR', 23),
     },
     offlineNotice: bool(env, 'OFFLINE_NOTICE', true),
     access: {
-      mode: str(env, 'ACCESS_MODE', 'PUBLIC'),
+      mode,
       whitelist: String(env.WHITELIST ?? '')
         .split(',')
-        .map((s) => s.trim())
+        .map(digits)
         .filter(Boolean),
     },
     limits: {
       debounceSec: num(env, 'DEBOUNCE_SEC', 3),
-      rateInMax: num(env, 'RATE_IN_MAX', 20),
-      rateInWindowSec: num(env, 'RATE_IN_WINDOW_SEC', 60),
+      rateInMax: positive(env, 'RATE_IN_MAX', 20),
+      rateInWindowSec: positive(env, 'RATE_IN_WINDOW_SEC', 60),
       rateInCooldownMin: num(env, 'RATE_IN_COOLDOWN_MIN', 5),
-      rateOutMax: num(env, 'RATE_OUT_MAX', 15),
-      rateOutWindowSec: num(env, 'RATE_OUT_WINDOW_SEC', 60),
+      rateOutMax: positive(env, 'RATE_OUT_MAX', 15),
+      rateOutWindowSec: positive(env, 'RATE_OUT_WINDOW_SEC', 60),
       chunkDelaySec: num(env, 'CHUNK_DELAY_SEC', 1),
       maxImageMb: num(env, 'MAX_IMAGE_MB', 5),
     },

@@ -1,0 +1,14 @@
+node_modules/
+
+# Kredensial sesi WhatsApp. Kalau folder ini bocor, orang lain bisa
+# mengambil alih nomor.
+auth/
+
+# Rahasia
+.env
+
+# Hasil generate saat runtime
+data/
+
+# Scratch internal skill, bukan bagian proyek
+.superpowers/

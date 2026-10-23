@@ -69,6 +69,20 @@ test('system prompt meminta kata yang ditarik, bukan dipotong', async () => {
   assert.match(system, /yaa/, 'permintaan langsung pemilik: "ya" harus jadi "yaa"')
 })
 
+test('system prompt meminta sapaan "kak" dipakai beberapa kali', async () => {
+  const system = await systemOf()
+  assert.doesNotMatch(
+    system,
+    /"kak" atau "kamu"/,
+    'selama "kamu" ditawarkan sebagai pilihan, model akan berpindah dari "kak"',
+  )
+  assert.match(
+    system,
+    /beberapa kali|berulang|lebih dari sekali/,
+    '"kak" sekali di awal balasan masih terasa kering — pemilik minta lebih banyak',
+  )
+})
+
 test('riwayat dipotong ke 20 pesan terakhir', async () => {
   const { impl, calls } = fakeFetch('ok')
   const ai = createAI({ config, knowledge: 'x', fetchImpl: impl })

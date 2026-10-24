@@ -1,5 +1,6 @@
 // Perekat ke Baileys. File ini sengaja tipis: tidak ada logika yang bisa
 // diuji di sini, semuanya didelegasikan ke config.js, pipeline.js, dan ai.js.
+import 'dotenv/config'
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { makeWASocket, useMultiFileAuthState, DisconnectReason, downloadMediaMessage, DEFAULT_CONNECTION_CONFIG } from '@whiskeysockets/baileys'

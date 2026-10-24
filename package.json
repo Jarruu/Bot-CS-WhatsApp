@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node --env-file=.env index.js",
+    "start": "node index.js",
     "test": "node --test"
   },
   "dependencies": {

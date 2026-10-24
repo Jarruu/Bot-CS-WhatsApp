@@ -94,7 +94,12 @@ try {
 
 // ---- Balasan -------------------------------------------------------------
 function outsideHours() {
-  const hour = new Date().getHours()
+  // Jam operasional pakai WIB (Asia/Jakarta), bukan UTC
+  const hour = Number(new Date().toLocaleString('id-ID', {
+    timeZone: 'Asia/Jakarta',
+    hour: 'numeric',
+    hour12: false,
+  }))
   return hour < config.hours.open || hour >= config.hours.close
 }
 

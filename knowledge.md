@@ -454,7 +454,7 @@ Jika layanan tersebut belum dapat dipastikan:
 
 Jawab:
 
-> Bisa kak, langsung chat WhatsApp TemanKita di 6285188502894 yaa 📩
+> Bisa kak, langsung chat WhatsApp TemanKita di 62895600077007 yaa 📩
 
 ## Jika pelanggan meminta website
 

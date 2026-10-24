@@ -39,12 +39,33 @@ diganti, bot akan menjawab pelanggan dengan informasi karangan.
 npm start
 ```
 
-QR muncul di terminal. Scan dari HP: **WhatsApp → Pengaturan → Perangkat
-tertaut → Tautkan perangkat**. Sesi disimpan di `auth/`, jadi scan hanya
-sekali. Kalau kamu logout dari HP, jalankan ulang dan scan lagi.
+Bot menyalakan server HTTP di port `3000` (lokal) atau `PORT` (Railway). QR
+WhatsApp tersedia di `/qr` — buka URL dari log, lalu scan dari HP: **WhatsApp
+→ Pengaturan → Perangkat tertaut → Tautkan perangkat**.
 
-Jalankan di laptop dulu untuk uji coba. Kalau sudah yakin, pindahkan ke VPS
-supaya tetap hidup saat laptopmu mati.
+QR ASCII tetap muncul di log untuk debugging, tapi QR di halaman `/qr` jauh
+lebih andal untuk dipindai. Halaman ini dilindungi token — URL lengkapnya ada
+di log boot.
+
+Sesi disimpan di `auth/`, jadi scan hanya sekali. Kalau kamu logout dari HP,
+jalankan ulang dan scan lagi.
+
+### Deploy Railway
+
+1. Push project ke Git
+2. Deploy ke Railway dari repo
+3. Tambahkan Variables di Railway:
+   - `AI_API_KEY`
+   - `AI_MODEL`
+   - `BUSINESS_NAME`
+   - `OWNER_NUMBER`
+   - (Opsional) `QR_TOKEN` — kalau kosong, token acak dibuat tiap boot
+4. Railway mengisi `PORT` otomatis — tidak perlu ditambahkan manual
+5. Buka log Railway, cari baris yang menampilkan URL `/qr`
+6. Buka URL itu dari HP, scan QR
+
+Setelah login pertama, sesi tersimpan di volume Railway dan bot reconnect
+otomatis tanpa perlu scan ulang.
 
 ## Semua variabel `.env`
 

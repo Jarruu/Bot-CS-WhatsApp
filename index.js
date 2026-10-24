@@ -11,6 +11,7 @@ import {
   extractText, extractImage, shouldIgnore, chunkText,
   createDebouncer, createRateLimiter, createSendGate, createQueue, createTakeover,
 } from './pipeline.js'
+import { createQrServer, qrPageUrl } from './server.js'
 
 // Baileys butuh logger di dua tempat, dan objeknya harus sama. Socket tidak
 // menyimpan logger-nya, jadi ambil dari default resminya.
@@ -247,6 +248,9 @@ function handleMessages(event) {
 let sock
 let reconnecting = false
 
+// State untuk halaman QR: starting | waiting | connected | disconnected | logged_out
+const qrState = { status: 'starting', qr: null, qrAt: null }
+
 async function start() {
   const { state, saveCreds } = await useMultiFileAuthState('auth')
 
@@ -266,12 +270,19 @@ async function start() {
     const { connection, qr, lastDisconnect } = update
 
     if (qr) {
-      console.log('\nScan QR berikut dari WhatsApp di HP: Pengaturan → Perangkat tertaut.\n')
+      qrState.status = 'waiting'
+      qrState.qr = qr
+      qrState.qrAt = Date.now()
+      console.log('\nQR WhatsApp tersedia. Buka URL berikut dari HP:\n')
+      console.log(`  ${qrPageUrl(PORT)}\n`)
       qrcode.generate(qr, { small: true })
     }
 
     if (connection === 'open') {
       reconnecting = false
+      qrState.status = 'connected'
+      qrState.qr = null
+      qrState.qrAt = null
       console.log(`\nTersambung. Bot ${config.businessName} siap menerima pesan.\n`)
     }
 
@@ -279,6 +290,9 @@ async function start() {
 
     const code = lastDisconnect?.error?.output?.statusCode
     if (code === DisconnectReason.loggedOut) {
+      qrState.status = 'logged_out'
+      qrState.qr = null
+      qrState.qrAt = null
       console.log('\nSesi WhatsApp sudah tidak berlaku. Jalankan ulang lalu scan QR lagi.')
       flushHistory()
       process.exit(0)
@@ -286,6 +300,7 @@ async function start() {
 
     if (reconnecting) return
     reconnecting = true
+    qrState.status = 'disconnected'
     console.log(`\nKoneksi putus (kode ${code ?? 'tidak diketahui'}). Menyambung ulang...\n`)
     setTimeout(() => {
       start().catch((err) => {
@@ -303,6 +318,18 @@ process.on('SIGINT', () => {
   console.log('\nBerhenti. Menyimpan riwayat...')
   flushHistory()
   process.exit(0)
+})
+
+// ---- Server HTTP untuk QR ------------------------------------------------
+const PORT = process.env.PORT ? Number(process.env.PORT) : 3000
+const server = createQrServer({
+  getState: () => qrState,
+  businessName: config.businessName,
+})
+
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`\nServer HTTP berjalan di port ${PORT}`)
+  console.log(`QR page: ${qrPageUrl(PORT)}\n`)
 })
 
 start().catch((err) => {

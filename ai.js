@@ -1,44 +1,33 @@
 const ESCALATE = '[[ESCALATE]]'
-const FALLBACK = 'Maaf ya, sistem kami lagi sibuk 🙏 Coba kirim lagi sebentar lagi ya.'
+const HANDOVER_MESSAGE = 'Pesan kakak sudah kami teruskan ke admin, nanti akan dibalas langsung yaa kak :D'
+const FALLBACK = HANDOVER_MESSAGE
 const MAX_HISTORY = 20
 const IMAGE_PLACEHOLDER = '[gambar]'
+const MAX_CACHE = 200
+// Pertanyaan sependek "bisa?" atau "iya" jawabannya bergantung konteks chat,
+// jadi tidak boleh dilayani dari cache pertanyaan lain. Yang panjang juga
+// tidak: pesan detail pesanan dijawab spesifik untuk pengirimnya.
+const MIN_CACHE_CHARS = 6
+const MAX_CACHE_CHARS = 60
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+/** "Jam buka?" dan "jam buka" adalah pertanyaan yang sama. */
+const cacheKey = (text) =>
+  String(text ?? '')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
 
 function buildSystemPrompt(config, knowledge) {
   return [
-    `Kamu adalah asisten customer service untuk ${config.businessName}.`,
-    'Jawab dalam bahasa Indonesia, singkat, dan ramah seperti admin muda yang',
-    'senang membantu dan hangat — bukan seperti balasan mesin atau surat resmi.',
-    '',
-    'Gaya balasan:',
-    '- Sapa seperlunya, jangan bertele-tele. Langsung ke jawabannya.',
-    '- Jangan cuek. Tanggapi dulu apa yang pelanggan bilang dengan hangat,',
-    '  baru masuk ke isi jawabannya. Kalau dia mengirim gambar, komentari',
-    '  gambarnya sebentar sebelum menjawab.',
-    '- Pakai emoji 2 sampai 4 per balasan, dan usahakan minimal satu. Emoji',
-    '  yang bikin balasan terasa hidup, bukan yang sekadar menempel di akhir.',
-    '- Jangan taruh emoji di tengah daftar harga, angka, atau langkah teknis —',
-    '  di situ emoji bikin susah dibaca.',
-    '- Pakai kata yang ditarik, bukan dipotong. "yaa", bukan "ya". "sip" atau',
-    '  "oke", bukan "ok". "gak", bukan "tidak". Tapi jangan berlebihan sampai',
-    '  hurufnya jadi banyak sekali.',
-    '- JANGAN menutup kalimat atau baris dengan titik. Tanpa titik terasa',
-    '  akrab, dengan titik terasa seperti surat resmi. Tanda tanya dan tanda',
-    '  seru tetap boleh dipakai. Titik tetap dipakai di dalam angka',
-    '  (Rp75.000) dan di penomoran daftar (1. 2. 3.) — yang itu jangan dihapus.',
-    '- Panggil pelanggan dengan "kak", bukan "kamu" atau "Anda". Pakai',
-    '  beberapa kali dalam satu balasan: di sapaan awal, dan sekali lagi saat',
-    '  menawarkan atau mengonfirmasi sesuatu. Tapi jangan di tiap kalimat —',
-    '  itu malah terdengar seperti orang yang bicara sendiri.',
-    '- Kabar baik (stok ada, bisa dikirim) disampaikan dengan senang. Kabar',
-    '  buruk (kosong, tidak bisa) disampaikan lembut, lalu tawarkan alternatif.',
-    '- Jangan pakai tanda seru bertumpuk atau huruf besar semua.',
-    '',
-    'Kalau di informasi bisnis di bawah ada aturan gaya bicara sendiri, ikuti',
-    'aturan itu — itu keinginan langsung pemilik usaha.',
-    '',
-    'Jawab HANYA berdasarkan informasi bisnis di bawah ini.',
-    'Kalau jawabannya tidak ada di sana, JANGAN mengarang.',
-    `Mulai balasanmu dengan penanda ${ESCALATE} kalau jawabannya tidak ada di sana.`,
+    `Kamu CS WhatsApp ${config.businessName}. Balas bahasa Indonesia, singkat, ramah, dan hangat.`,
+    '- Panggil pelanggan "kak" beberapa kali, jangan "kamu". Pakai "yaa", "sip", "gak".',
+    '- Emoji 2 sampai 4 per balasan, tapi jangan di tengah harga, angka, atau daftar.',
+    '- Jangan akhiri kalimat dengan titik. Titik di dalam angka (Rp75.000) dan penomoran (1.) tetap.',
+    '- Kalau pelanggan kirim gambar, komentari gambarnya sebentar sebelum menjawab.',
+    '- Jawab HANYA dari informasi bisnis di bawah. Kalau tidak ada di sana, jangan mengarang:',
+    `  mulai balasan dengan ${ESCALATE}.`,
     '',
     'Informasi bisnis:',
     '---',
@@ -69,12 +58,31 @@ export function dropTrailingPeriods(text) {
     .join('\n')
 }
 
-export function createAI({ config, knowledge, fetchImpl = fetch }) {
+export function createAI({
+  config,
+  knowledge,
+  fetchImpl = fetch,
+  sleepImpl = sleep,
+  retryDelayMs = 5000,
+  maxRetries = 5,
+  sessionTimeoutMs = 6 * 60 * 60 * 1000,
+}) {
   /** @type {Map<string, Array<{role: string, content: string}>>} */
   const histories = new Map()
+  const lastActive = new Map()
+  // Pertanyaan berulang (jam buka, ongkir, cara bayar) dijawab tanpa LLM.
+  // Isinya jawaban jadi — bukan riwayat chat — supaya pertanyaan sejenis dari
+  // pelanggan lain tetap dapat jawaban yang sama persis.
+  const answers = new Map()
   const systemPrompt = buildSystemPrompt(config, knowledge)
 
   const historyFor = (jid) => {
+    const now = Date.now()
+    const last = lastActive.get(jid)
+    if (last && now - last > sessionTimeoutMs) {
+      histories.delete(jid)
+    }
+    lastActive.set(jid, now)
     if (!histories.has(jid)) histories.set(jid, [])
     return histories.get(jid)
   }
@@ -86,16 +94,16 @@ export function createAI({ config, knowledge, fetchImpl = fetch }) {
     while (list.length > MAX_HISTORY) list.shift()
   }
 
-  async function callProvider(model, messages) {
-    const res = await fetchImpl(`${config.aiBaseUrl}/chat/completions`, {
+  async function callProvider(provider, messages) {
+    const res = await fetchImpl(`${provider.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${config.aiApiKey}`,
+        Authorization: `Bearer ${provider.apiKey}`,
       },
-      body: JSON.stringify({ model, messages }),
+      body: JSON.stringify({ model: provider.model, messages }),
     })
-    if (!res.ok) throw new Error(`provider membalas ${res.status}`)
+    if (!res.ok) throw new Error(`provider ${provider.name} membalas ${res.status}`)
     const data = await res.json()
     const content = data?.choices?.[0]?.message?.content
     if (typeof content !== 'string') throw new Error('bentuk balasan provider tidak dikenali')
@@ -103,10 +111,30 @@ export function createAI({ config, knowledge, fetchImpl = fetch }) {
   }
 
   return {
-    async ask({ jid, text, image }) {
+    async ask({
+      jid,
+      text,
+      image,
+      onWait,
+      retryDelayMs: callRetryDelayMs,
+      maxRetries: callMaxRetries,
+      shouldStop = () => false,
+    }) {
+      const actualRetryDelay = callRetryDelayMs ?? retryDelayMs
+      const actualMaxRetries = callMaxRetries ?? maxRetries
+
       const history = historyFor(jid)
 
       const label = image ? (text ? `${text} ${IMAGE_PLACEHOLDER}` : IMAGE_PLACEHOLDER) : text
+      const key = !image ? cacheKey(text) : ''
+      const cacheable = key.length >= MIN_CACHE_CHARS && key.length <= MAX_CACHE_CHARS
+      const cached = cacheable ? answers.get(key) : undefined
+      if (cached) {
+        history.push({ role: 'user', content: label }, { role: 'assistant', content: cached })
+        trim(history)
+        return { reply: cached, escalated: false, failed: false, waited: false, answeredBy: 'cache', model: 'cache', attempts: 0 }
+      }
+
       history.push({ role: 'user', content: label })
       trim(history)
 
@@ -126,22 +154,62 @@ export function createAI({ config, knowledge, fetchImpl = fetch }) {
         }
       }
 
-      const model = image ? config.aiVisionModel : config.aiModel
+      // Pesan bergambar butuh model bervisi: pakai chain vision kalau ada,
+      // kalau tidak ada (semua provider tanpa VISION_MODEL) jatuh ke chain
+      // chat — model chat dianggap bisa menerima gambar.
+      const chain = image
+        ? (config.ai.vision.length ? config.ai.vision : config.ai.chat)
+        : config.ai.chat
 
       let raw
       let failed = false
-      try {
-        raw = await callProvider(model, messages)
-      } catch {
+      let notifiedWait = false
+      let attempt = 0
+      let answeredBy = null
+      let answeredModel = null
+
+      while (true) {
+        attempt++
+        // Percobaan pertama = provider pertama (utama). Kalau dia gagal,
+        // percobaan berikutnya pindah provider; setelah provider terakhir,
+        // putar kembali ke awal — satu putaran penuh per maksimal retry.
+        const provider = chain[(attempt - 1) % chain.length]
         try {
-          raw = await callProvider(model, messages)
-        } catch {
-          failed = true
+          raw = await callProvider(provider, messages)
+          failed = false
+          answeredBy = provider.name
+          answeredModel = provider.model
+          break
+        } catch (err) {
+          // Tanpa ini, kegagalan provider hilang begitu saja dari console:
+          // pemilik tidak bisa tahu provider mana yang mati dan kenapa.
+          console.error(`percobaan ${attempt} (${provider.name}) gagal: ${err?.message || err}`)
+          // Pesan tunggu baru dikirim setelah SATU PUTARAN penuh chain gagal,
+          // bukan saat provider pertama saja. Punya provider cadangan berarti
+          // satu kegagalan itu tidak perlu dirasakan pelanggan.
+          if (attempt >= chain.length && !notifiedWait) {
+            notifiedWait = true
+            if (onWait) {
+              try {
+                await onWait()
+              } catch (waitErr) {
+                console.error('gagal memanggil onWait:', waitErr?.message || waitErr)
+              }
+            }
+          }
+
+          // attempt 1 adalah percobaan awal, lalu maksimal actualMaxRetries kali retry
+          if (attempt > actualMaxRetries || shouldStop()) {
+            failed = true
+            break
+          }
+
+          await sleepImpl(actualRetryDelay)
         }
       }
 
       if (failed) {
-        return { reply: FALLBACK, escalated: true, failed: true }
+        return { reply: FALLBACK, escalated: true, failed: true, waited: notifiedWait, answeredBy: null, model: null, attempts: attempt }
       }
 
       // Penanda bisa datang di mana saja: model kecil dan gratis rutin
@@ -156,7 +224,14 @@ export function createAI({ config, knowledge, fetchImpl = fetch }) {
       history.push({ role: 'assistant', content: reply })
       trim(history)
 
-      return { reply, escalated, failed: false }
+      // Eskalasi tidak di-cache: jawabannya belum pasti, dan menyimpannya
+      // berarti pertanyaan berikutnya ikut ditolak tanpa dicek.
+      if (cacheable && !escalated && reply) {
+        answers.set(key, reply)
+        if (answers.size > MAX_CACHE) answers.delete(answers.keys().next().value)
+      }
+
+      return { reply, escalated, failed: false, waited: notifiedWait, answeredBy, model: answeredModel, attempts: attempt }
     },
 
     /**

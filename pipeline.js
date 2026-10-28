@@ -197,7 +197,7 @@ export function createQueue() {
  * membedakan keduanya, bot akan menganggap dirinya manusia lalu mem-pause
  * chat-nya sendiri dan berhenti menjawab pelanggan tanpa suara.
  */
-export function createTakeover({ pauseMs = 1_800_000 } = {}) {
+export function createTakeover({ pauseMs = 600_000 } = {}) {
   // ponytail: Set ini tumbuh seumur proses. Beberapa ribu string per bulan
   // tidak masalah; pindah ke ring buffer kalau botnya sampai puluhan ribu
   // pesan sehari.
@@ -213,6 +213,9 @@ export function createTakeover({ pauseMs = 1_800_000 } = {}) {
     },
     pause(jid) {
       pausedUntil.set(jid, Date.now() + pauseMs)
+    },
+    resume(jid) {
+      pausedUntil.delete(jid)
     },
     isPaused(jid) {
       const until = pausedUntil.get(jid)

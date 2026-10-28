@@ -2,7 +2,9 @@ import { existsSync, readFileSync } from 'node:fs'
 
 // Urutan di sini menentukan urutan nama di pesan error, dan tesnya
 // mencocokkan urutan itu.
-const REQUIRED = ['AI_API_KEY', 'AI_MODEL', 'BUSINESS_NAME', 'OWNER_NUMBER']
+const REQUIRED = ['BUSINESS_NAME', 'OWNER_NUMBER']
+
+const PROVIDER_FIELDS = ['BASE_URL', 'API_KEY', 'MODEL']
 
 const str = (env, key, fallback) => {
   const raw = env[key]
@@ -29,15 +31,82 @@ const positive = (env, key, fallback) => {
   return n
 }
 
-const bool = (env, key, fallback) => {
-  const raw = env[key]
-  if (raw === undefined || raw === '') return fallback
-  return !['false', '0', 'no', 'off'].includes(String(raw).trim().toLowerCase())
-}
-
 /** WhatsApp memakai digit saja. "+62 812-345" bikin JID tidak sah dan
  *  pesannya diam-diam tidak pernah sampai. */
 const digits = (raw) => String(raw ?? '').replace(/\D/g, '')
+
+/**
+ * Untuk nama di AI_PROVIDERS (misal "google") → prefix env "AI_GOOGLE_...".
+ * Nama yang berisi selain huruf/angka/garis bawah jadi env key yang
+ * mustahil ditulis, jadi ditolak sebelum bot start, bukan diam-diam
+ * dicari lalu tidak ketemu.
+ */
+const providerPrefix = (name) => {
+  if (!/^[A-Za-z0-9_]+$/.test(name)) {
+    throw new Error(
+      `Nama provider "${name}" di AI_PROVIDERS hanya boleh huruf, angka, dan ` +
+        'garis bawah — env-nya diawali AI_' + name.toUpperCase() + '_.',
+    )
+  }
+  return `AI_${name.toUpperCase()}_`
+}
+
+/**
+ * Baca daftar provider dari AI_PROVIDERS, urutannya jadi urutan fallback.
+ * Setiap provider wajib punya AI_<NAMA>_BASE_URL, AI_<NAMA>_API_KEY, dan
+ * AI_<NAMA>_MODEL; yang juga punya AI_<NAMA>_VISION_MODEL ikut jadi
+ * pilihan model bervisi.
+ */
+function loadProviders(env) {
+  const names = String(env.AI_PROVIDERS ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+  // Kosong sudah ditolak di loadConfig supaya pesannya gabungan dengan
+  // variabel wajib yang lain; di sini fokus ke kelengkapan tiap provider.
+
+  const kurang = []
+  const chat = []
+  const vision = []
+  for (const name of names) {
+    const prefix = providerPrefix(name)
+    // API key kosong = provider tidak dipakai. Tanpa aturan ini, punya empat
+    // provider cadangan berarti wajib mengisi keempat API key sekaligus —
+    // satu yang kosong bikin bot menolak start.
+    if (!String(env[prefix + 'API_KEY'] ?? '').trim()) continue
+    const missing = PROVIDER_FIELDS.filter((f) => !String(env[prefix + f] ?? '').trim())
+    if (missing.length) {
+      kurang.push(`provider "${name}" kurang: ${missing.map((f) => prefix + f).join(', ')}`)
+      continue
+    }
+    const provider = {
+      name,
+      baseUrl: env[prefix + 'BASE_URL'].replace(/\/+$/, ''),
+      apiKey: env[prefix + 'API_KEY'],
+      model: env[prefix + 'MODEL'],
+    }
+    chat.push(provider)
+    const visionModel = str(env, prefix + 'VISION_MODEL', '')
+    if (visionModel) vision.push({ ...provider, model: visionModel })
+  }
+
+  if (kurang.length) {
+    throw new Error(
+      kurang.join('; ') +
+        '. Isi di file .env — lihat .env.example untuk daftar lengkapnya.',
+    )
+  }
+  // Chain kosong bikin bot diam tanpa error: tidak ada provider yang bisa
+  // dipanggil. Lebih baik mati saat start dengan pesan jelas.
+  if (!chat.length) {
+    throw new Error(
+      'Tidak ada satu pun provider AI yang terisi. Isi AI_<NAMA>_BASE_URL, ' +
+        'AI_<NAMA>_API_KEY, dan AI_<NAMA>_MODEL untuk minimal satu nama di AI_PROVIDERS.',
+    )
+  }
+
+  return { chat, vision }
+}
 
 /**
  * Membaca konfigurasi dari objek env yang diberikan, bukan langsung dari
@@ -45,12 +114,17 @@ const digits = (raw) => String(raw ?? '').replace(/\D/g, '')
  */
 export function loadConfig(env = process.env) {
   const missing = REQUIRED.filter((key) => !String(env[key] ?? '').trim())
-  if (missing.length) {
+  const namesRaw = String(env.AI_PROVIDERS ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+  if (missing.length || !namesRaw.length) {
     throw new Error(
-      `Konfigurasi kurang: ${missing.join(', ')}. ` +
+      `Konfigurasi kurang: ${[...(!namesRaw.length ? ['AI_PROVIDERS'] : []), ...missing].join(', ')}. ` +
         'Isi di file .env — lihat .env.example untuk daftar lengkapnya.',
     )
   }
+  const ai = loadProviders(env)
 
   const ownerNumber = digits(env.OWNER_NUMBER)
   if (!ownerNumber) {
@@ -73,18 +147,12 @@ export function loadConfig(env = process.env) {
   }
 
   return {
-    aiBaseUrl: str(env, 'AI_BASE_URL', 'https://openrouter.ai/api/v1'),
-    aiApiKey: env.AI_API_KEY,
-    aiModel: env.AI_MODEL,
-    // Kosong berarti pakai model yang sama untuk teks dan gambar.
-    aiVisionModel: str(env, 'AI_VISION_MODEL', env.AI_MODEL),
+    // chat: urutan fallback untuk pesan teks, sesuai urutan AI_PROVIDERS.
+    // vision: hanya provider yang punya VISION_MODEL, urutan sama. Kalau
+    // kosong, pesan bergambar memakai chain chat (model chat dianggap bisa).
+    ai,
     businessName: env.BUSINESS_NAME,
     ownerNumber,
-    hours: {
-      open: num(env, 'OPEN_HOUR', 8),
-      close: num(env, 'CLOSE_HOUR', 23),
-    },
-    offlineNotice: bool(env, 'OFFLINE_NOTICE', true),
     access: {
       mode,
       whitelist: String(env.WHITELIST ?? '')

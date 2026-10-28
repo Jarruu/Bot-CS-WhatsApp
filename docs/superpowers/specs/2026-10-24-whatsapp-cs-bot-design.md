@@ -198,8 +198,7 @@ Seluruh isi file ini bisa diuji tanpa menyentuh WhatsApp:
 - **Riwayat:** `Map<jid, Array<{role, content}>>` berisi teks saja, dipotong ke
   20 pesan terakhir per chat. Ditulis ke `data/history.json` dengan debounce
   ~2 detik, bukan setiap pesan.
-- **Retry:** satu kali percobaan ulang. Masih gagal → kembalikan pesan fallback.
-  `ask` **tidak pernah melempar** — kontraknya selalu mengembalikan objek.
+- **Retry:** jika gagal menghubungi AI, kirim pesan tunggu "Baik kak, mohon ditunggu sebentar yaa kak." dan terus mengulang panggilan AI tiap 5 detik sampai berhasil. `ask` **tidak pernah melempar** — kontraknya selalu mengembalikan objek.
 - `knowledge.md` hilang atau kosong → gagal start dengan pesan jelas.
 
 ### `knowledge.md` — sumber jawaban
@@ -225,7 +224,7 @@ menerima `fromMe: true`:
 
 | Kejadian | Perilaku |
 |---|---|
-| API gagal atau membalas 4xx/5xx | Retry sekali, lalu balas "sedang sibuk, mohon tunggu sebentar". Proses tetap hidup. |
+| API gagal atau membalas 4xx/5xx | Kirim "Baik kak, mohon ditunggu sebentar yaa kak.", lalu terus retry tiap 5 detik. Proses tetap hidup. |
 | Gambar gagal diunduh | Balas minta kirim ulang. Jangan crash. |
 | Koneksi WA putus | Reconnect otomatis. Kalau `loggedOut`, berhenti dan beri tahu. |
 | `knowledge.md` hilang atau kosong | Gagal start dengan pesan jelas. |

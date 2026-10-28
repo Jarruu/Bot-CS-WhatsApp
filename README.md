@@ -20,12 +20,13 @@ npm install
 cp .env.example .env
 ```
 
-Buka `.env`, isi minimal empat ini:
+Buka `.env`, isi minimal lima ini:
 
 | Variabel | Isi |
 |---|---|
-| `AI_API_KEY` | API key dari provider |
-| `AI_MODEL` | ID model, misal `nvidia/nemotron-3.5-super-vl:free` |
+| `AI_PROVIDERS` | Nama provider dipisah koma, misal `google,cloudflare,groq,openrouter` — urutan = urutan fallback |
+| `AI_GOOGLE_API_KEY` | API key Google AI Studio (nama variabel mengikuti nama provider) |
+| `AI_GOOGLE_MODEL` | ID model, misal `gemini-2.5-flash` |
 | `BUSINESS_NAME` | Nama usahamu — dipakai di system prompt |
 | `OWNER_NUMBER` | Nomormu, format `62812...` tanpa tanda plus |
 
@@ -55,8 +56,8 @@ jalankan ulang dan scan lagi.
 1. Push project ke Git
 2. Deploy ke Railway dari repo
 3. Tambahkan Variables di Railway:
-   - `AI_API_KEY`
-   - `AI_MODEL`
+   - `AI_PROVIDERS`
+   - `AI_GOOGLE_API_KEY`, `AI_GOOGLE_MODEL` (nama variabel mengikuti nama provider)
    - `BUSINESS_NAME`
    - `OWNER_NUMBER`
    - (Opsional) `QR_TOKEN` — kalau kosong, token acak dibuat tiap boot
@@ -71,15 +72,13 @@ otomatis tanpa perlu scan ulang.
 
 | Variabel | Default | Keterangan |
 |---|---|---|
-| `AI_BASE_URL` | `https://openrouter.ai/api/v1` | Endpoint OpenAI-compatible |
-| `AI_API_KEY` | — | **Wajib** |
-| `AI_MODEL` | — | **Wajib.** ID model dari provider |
-| `AI_VISION_MODEL` | = `AI_MODEL` | Opsional. Model untuk pesan bergambar |
+| `AI_PROVIDERS` | — | **Wajib.** Nama provider dipisah koma, urutan = urutan fallback |
+| `AI_<NAMA>_BASE_URL` | — | **Wajib** per provider. Endpoint OpenAI-compatible |
+| `AI_<NAMA>_API_KEY` | — | **Wajib** per provider |
+| `AI_<NAMA>_MODEL` | — | **Wajib** per provider. ID model teks |
+| `AI_<NAMA>_VISION_MODEL` | — | Opsional per provider. Model untuk pesan bergambar; tanpa satu pun, gambar memakai chain teks |
 | `BUSINESS_NAME` | — | **Wajib** |
 | `OWNER_NUMBER` | — | **Wajib.** Tujuan eskalasi |
-| `OPEN_HOUR` | `8` | Jam buka |
-| `CLOSE_HOUR` | `23` | Jam tutup |
-| `OFFLINE_NOTICE` | `true` | Tambah baris "admin offline" di luar jam kerja |
 | `ACCESS_MODE` | `PUBLIC` | `PUBLIC` atau `WHITELIST` |
 | `WHITELIST` | — | Nomor dipisah koma, dipakai kalau `ACCESS_MODE=WHITELIST` |
 | `DEBOUNCE_SEC` | `8` | Jeda mengumpulkan pesan beruntun jadi satu balasan |
@@ -95,6 +94,52 @@ otomatis tanpa perlu scan ulang.
 terlalu cepat — yang hidup bulan ini bisa mati bulan depan. Kalau bot tiba-tiba
 membalas "sedang sibuk" padahal API key benar, cek dulu apakah modelnya masih
 ada.
+
+## Multi-provider dan fallback
+
+Urutan di `AI_PROVIDERS` adalah urutan fallback. Contoh:
+
+```env
+AI_PROVIDERS=google,cloudflare,groq,openrouter
+```
+
+Setiap pesan dicoba ke provider pertama dulu. Kalau gagal — error HTTP,
+timeout, respons rusak — percobaan berikutnya pindah ke provider kedua, dan
+setelah provider terakhir putar kembali ke yang pertama, sampai batas retry
+habis. Pelanggan tetap dibalas selama minimal satu provider hidup; provider
+mati tidak membuat bot membalas "sedang sibuk".
+
+Provider yang `AI_<NAMA>_API_KEY`-nya kosong dilewati, jadi kamu tidak wajib
+mengisi keempat API key sekaligus. Minimal satu provider harus terisi; API key
+terisi tapi `MODEL` kosong tetap ditolak.
+
+Setup yang dianjurkan:
+
+| Peran | Provider | Model |
+|---|---|---|
+| Utama | Google AI Studio | `gemini-2.5-flash` |
+| Cadangan 1 | Cloudflare Workers AI | `@cf/meta/llama-3.1-8b-instruct` |
+| Cadangan 2 | Groq | `llama-3.3-70b-versatile` |
+| Cadangan 3 | OpenRouter | `meta-llama/llama-3.3-70b-instruct:free` |
+| Vision utama | Google AI Studio | `gemini-2.5-flash` |
+| Vision cadangan | Cloudflare Workers AI | `@cf/meta/llama-3.2-11b-vision-instruct` |
+
+Chain vision terpisah dari chain teks: hanya provider yang punya
+`AI_<NAMA>_VISION_MODEL` yang ikut menangani pesan bergambar. Kalau tidak ada
+satu pun provider yang menyetel `VISION_MODEL`, pesan bergambar memakai chain
+teks.
+
+## Cache jawaban
+
+Pertanyaan yang berulang — jam buka, ongkir, cara bayar — dijawab dari cache
+di memori tanpa memanggil LLM. Kuncinya teks yang sudah dinormalkan (huruf
+kecil, tanda baca dibuang), jadi "Jam buka?" dan "jam buka" dianggap sama dan
+berlaku lintas pelanggan.
+
+Yang tidak pernah di-cache: pesan bergambar, pertanyaan di bawah 6 karakter atau
+di atas 60 karakter (jawabannya bergantung konteks chat), dan jawaban yang
+dieskalasi. Cache hilang saat bot restart — itu disengaja, supaya jawaban lama
+tidak bertahan setelah `knowledge.md` diperbarui.
 
 ## Menyetel batas
 

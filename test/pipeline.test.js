@@ -136,3 +136,11 @@ test('pause berlaku per chat', () => {
   assert.equal(t.isPaused(CHAT), true)
   assert.equal(t.isPaused('lain@s.whatsapp.net'), false)
 })
+
+test('resume membatalkan pause takeover lebih cepat', () => {
+  const t = createTakeover()
+  t.pause(CHAT)
+  assert.equal(t.isPaused(CHAT), true)
+  t.resume(CHAT)
+  assert.equal(t.isPaused(CHAT), false)
+})

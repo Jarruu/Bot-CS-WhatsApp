@@ -47,14 +47,25 @@ const rateLimiter = createRateLimiter({
   cooldownMs: limits.rateInCooldownMin * 60 * 1000,
 })
 const sendGate = createSendGate({ max: limits.rateOutMax, windowMs: limits.rateOutWindowSec * 1000 })
-const queue = createQueue()
-const takeover = createTakeover()
+const chatQueues = new Map()
+function queueFor(jid) {
+  if (!chatQueues.has(jid)) chatQueues.set(jid, createQueue())
+  return chatQueues.get(jid)
+}
+const takeover = createTakeover({ pauseMs: 10 * 60 * 1000 })
 
 const OWNER_JID = `${config.ownerNumber}@s.whatsapp.net`
+const WAIT_MESSAGE = 'Baik kak, mohon ditunggu sebentar yaa kak.'
+const HANDOVER_MESSAGE = 'Pesan kakak sudah kami teruskan ke admin, nanti akan dibalas langsung yaa kak :D'
+const UNSUPPORTED_MEDIA_MESSAGE = 'Maaf ya kak, saat ini bot TemanKita baru bisa membaca teks dan foto 📷 Boleh tolong diketik atau kirim foto saja yaa kak :D'
+const RATE_LIMIT_MESSAGE = 'Baik kak, mohon tunggu sebentar yaa agar admin bisa memproses pesan sebelumnya :D'
 const EMPTY_REPLY = 'Maaf ya kak, aku belum bisa jawab itu 🙏 Aku tanyakan dulu ke admin, nanti dibalas ya kak :D'
 const IMAGE_TOO_BIG = 'Gambarnya kegedean jadi belum bisa aku buka 📷 Coba kirim ulang dengan ukuran lebih kecil ya kak :D'
 const IMAGE_FAILED = 'Gambarnya gagal aku buka 📷 Coba kirim ulang ya kak :D'
 const FAILURE_NOTICE_INTERVAL_MS = 15 * 60 * 1000
+
+const rateLimitNotified = new Map()
+const unsupportedNotified = new Map()
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const now = () => new Date().toISOString()
@@ -94,16 +105,6 @@ try {
 }
 
 // ---- Balasan -------------------------------------------------------------
-function outsideHours() {
-  // Jam operasional pakai WIB (Asia/Jakarta), bukan UTC
-  const hour = Number(new Date().toLocaleString('id-ID', {
-    timeZone: 'Asia/Jakarta',
-    hour: 'numeric',
-    hour12: false,
-  }))
-  return hour < config.hours.open || hour >= config.hours.close
-}
-
 async function send(jid, text) {
   await sendGate.waitTurn()
   let sent
@@ -132,19 +133,32 @@ async function notifyOwner(jid, question, reason) {
   const sistem = reason === 'sistem'
   // Kegagalan sistem berulang tidak boleh membanjiri WhatsApp pemilik —
   // notifikasi bertubi-tubi itu sendiri sinyal bot. Eskalasi pengetahuan
-  // tidak dibatasi: tiap pertanyaan baru memang perlu diteruskan.
+  // dan handover ke admin tidak dibatasi: tiap kejadian perlu diketahui manusia.
   if (sistem) {
     if (Date.now() - lastFailureNotice < FAILURE_NOTICE_INTERVAL_MS) return
     lastFailureNotice = Date.now()
   }
 
+  let title
+  if (reason === 'handover') {
+    title = '⚠️ Bot gagal menghubungi AI (setelah 5x coba). Chat dialihkan ke admin.'
+  } else if (reason === 'gambar-gagal') {
+    title = '📷 Pelanggan mengirim foto tapi gagal diunduh sistem.'
+  } else if (sistem) {
+    title = '⚠️ Bot gagal menghubungi AI.'
+  } else {
+    title = '📩 Ada pertanyaan yang bot belum bisa jawab.'
+  }
+
   const body = [
-    sistem ? '⚠️ Bot gagal menghubungi AI.' : '📩 Ada pertanyaan yang bot belum bisa jawab.',
+    title,
     '',
     `Nomor: ${jid.split('@')[0]}`,
     `Pesan: ${question}`,
   ]
-  if (sistem) body.push('', 'Cek AI_API_KEY, AI_MODEL, dan kuota provider.')
+  if (sistem || reason === 'handover' || reason === 'gambar-gagal') {
+    body.push('', 'Silakan balas atau cek langsung chat pelanggan dari HP.')
+  }
   await send(OWNER_JID, body.join('\n'))
 }
 
@@ -177,6 +191,7 @@ async function processMessage(jid, items) {
       // boleh menghentikan antrian untuk pelanggan lain.
       console.error('gagal mengunduh gambar:', err.message)
       await send(jid, IMAGE_FAILED)
+      await notifyOwner(jid, text || '[foto dari pelanggan]', 'gambar-gagal')
       log({ jid, dir: 'out', text: IMAGE_FAILED, adaGambar: false, eskalasi: false, sebab: 'unduh-gagal' })
       return
     }
@@ -185,13 +200,43 @@ async function processMessage(jid, items) {
   await sock.sendPresenceUpdate('composing', jid).catch(() => { })
   await sleep(1000 + Math.random() * 2000)
 
-  const { reply, escalated, failed } = await ai.ask({ jid, text, image })
+  const { reply, escalated, failed, waited, answeredBy, model, attempts } = await ai.ask({
+    jid,
+    text,
+    image,
+    onWait: async () => {
+      await send(jid, WAIT_MESSAGE)
+      await notifyOwner(jid, text || '[gambar]', 'sistem')
+    },
+    shouldStop: () => takeover.isPaused(jid),
+  })
+  // Model yang menjawab ikut tampil di console: kalau balasannya aneh, ini
+  // pertanyaan pertama yang perlu dijawab — provider mana yang sedang dipakai.
+  console.log(
+    failed
+      ? `[ai] ${jid.split('@')[0]}: gagal semua provider (${attempts} percobaan)`
+      : `[ai] ${jid.split('@')[0]}: ${answeredBy}/${model} (percobaan ${attempts})`,
+  )
+  // Nama provider yang menjawab + jumlah percobaan. Ini yang membuat
+  // pertanyaan "mana provider yang dipakai" bisa dijawab dari log, bukan
+  // dari tebakan.
+  log({ jid, dir: 'ai', text: null, adaGambar: Boolean(image), eskalasi: escalated, sebab: failed ? 'ai-gagal-total' : 'ai-berhasil', provider: answeredBy, model, percobaan: attempts })
   saveHistory()
 
-  let body = (reply ?? '').trim() || EMPTY_REPLY
-  if (config.offlineNotice && outsideHours()) {
-    body += `\n\n⏰ Admin sedang offline. Jam operasional ${config.hours.open}.00–${config.hours.close}.00`
+  // Jika chat diambil alih oleh pemilik saat bot sedang retry, jangan kirim balasan bot lagi
+  if (takeover.isPaused(jid)) {
+    return
   }
+
+  // Jika setelah 5x coba AI tetap gagal, alihkan chat ke admin:
+  if (failed) {
+    takeover.pause(jid)
+    await send(jid, HANDOVER_MESSAGE)
+    await notifyOwner(jid, text || '[gambar]', 'handover')
+    return
+  }
+
+  let body = (reply ?? '').trim() || EMPTY_REPLY
 
   const chunks = chunkText(body)
   for (let i = 0; i < chunks.length; i++) {
@@ -199,13 +244,12 @@ async function processMessage(jid, items) {
     if (i < chunks.length - 1) await sleep(limits.chunkDelaySec * 1000)
   }
 
-  if (escalated && !failed) await notifyOwner(jid, text || '[gambar]', 'pengetahuan')
-  if (failed) await notifyOwner(jid, text || '[gambar]', 'sistem')
+  if (escalated) await notifyOwner(jid, text || '[gambar]', 'pengetahuan')
 }
 
 // ---- Penanganan pesan ----------------------------------------------------
 function onFlush(jid, items) {
-  queue.push(async () => {
+  queueFor(jid).push(async () => {
     try {
       await processMessage(jid, items)
     } catch (err) {
@@ -226,21 +270,46 @@ function handleMessages(event) {
     // punya fromMe, jadi "ada fromMe" saja tidak cukup untuk menyimpulkan
     // pemilik sedang turun tangan.
     if (msg.key.fromMe) {
-      if (!takeover.isOwn(msg.key.id)) takeover.pause(jid)
+      if (!takeover.isOwn(msg.key.id)) {
+        const text = extractText(msg)?.trim()?.toLowerCase()
+        if (text === '!resume' || text === '!bot') {
+          takeover.resume(jid)
+        } else {
+          takeover.pause(jid)
+        }
+      }
       continue
     }
 
-    if (shouldIgnore(msg)) {
-      log({ jid, dir: 'in', text: null, adaGambar: false, eskalasi: false, sebab: 'tak-didukung' })
+    // Abaikan grup WhatsApp, status broadcast, dan saluran/newsletter
+    if (jid.endsWith('@g.us') || jid === 'status@broadcast' || jid.endsWith('@newsletter')) {
       continue
     }
+
     if (takeover.isPaused(jid)) continue
 
     const number = jid.split('@')[0]
     if (config.access.mode === 'WHITELIST' && !config.access.whitelist.includes(number)) continue
 
+    // Jika pesan bukan teks dan bukan gambar (misal voice note/audio, stiker, dokumen, video)
+    if (!extractText(msg) && !extractImage(msg)) {
+      log({ jid, dir: 'in', text: null, adaGambar: false, eskalasi: false, sebab: 'tak-didukung' })
+      const lastWarn = unsupportedNotified.get(jid) || 0
+      if (Date.now() - lastWarn > 30_000) {
+        unsupportedNotified.set(jid, Date.now())
+        send(jid, UNSUPPORTED_MEDIA_MESSAGE).catch(() => {})
+      }
+      continue
+    }
+
     if (!rateLimiter.check(jid)) {
       log({ jid, dir: 'in', text: null, adaGambar: false, eskalasi: false, sebab: 'rate-limit' })
+      const lastWarn = rateLimitNotified.get(jid) || 0
+      const cooldownMs = limits.rateInCooldownMin * 60 * 1000
+      if (Date.now() - lastWarn > cooldownMs) {
+        rateLimitNotified.set(jid, Date.now())
+        send(jid, RATE_LIMIT_MESSAGE).catch(() => {})
+      }
       continue
     }
 

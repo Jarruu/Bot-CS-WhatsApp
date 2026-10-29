@@ -6,79 +6,49 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
 const FULL = {
-  AI_PROVIDERS: 'zai,cloudflare',
-  AI_ZAI_BASE_URL: 'https://api.z.ai/api/paas/v4',
-  AI_ZAI_API_KEY: 'kz',
-  AI_ZAI_MODEL: 'glm-4.7-flash',
-  AI_ZAI_VISION_MODEL: 'glm-4.6v-flash',
-  AI_CLOUDFLARE_BASE_URL: 'https://api.cloudflare.com/client/v4/accounts/acc123/ai/v1',
-  AI_CLOUDFLARE_API_KEY: 'kc',
-  AI_CLOUDFLARE_MODEL: '@cf/meta/llama-3.1-8b-instruct',
+  AI_API_KEY: 'kg',
+  AI_MODELS: 'gemini-2.5-flash,gemini-2.5-flash-lite',
   BUSINESS_NAME: 'Toko', OWNER_NUMBER: '628123',
 }
 
 test('env kosong menyebut semua variabel yang kurang sekaligus', () => {
-  assert.throws(() => loadConfig({}), /AI_PROVIDERS[\s\S]*BUSINESS_NAME[\s\S]*OWNER_NUMBER/)
+  assert.throws(() => loadConfig({}), /AI_MODELS[\s\S]*AI_API_KEY[\s\S]*BUSINESS_NAME[\s\S]*OWNER_NUMBER/)
 })
 
-test('provider diparse sesuai urutan AI_PROVIDERS', () => {
+test('model diparse sesuai urutan AI_MODELS', () => {
   const c = loadConfig(FULL)
   assert.deepEqual(
-    c.ai.chat.map(p => [p.name, p.model]),
-    [['zai', 'glm-4.7-flash'], ['cloudflare', '@cf/meta/llama-3.1-8b-instruct']],
+    c.ai.map((p) => p.model),
+    ['gemini-2.5-flash', 'gemini-2.5-flash-lite'],
+    'urutan AI_MODELS = urutan fallback',
   )
 })
 
-test('provider yang punya VISION_MODEL membentuk chain vision sendiri', () => {
+test('semua model memakai base URL dan API key yang sama', () => {
   const c = loadConfig(FULL)
-  assert.deepEqual(
-    c.ai.vision.map(p => [p.name, p.model]),
-    [['zai', 'glm-4.6v-flash']],
-    'cloudflare tidak set VISION_MODEL, jadi tidak ikut chain vision',
-  )
-  // Chain vision tetap membawa baseUrl dan apiKey dari provider-nya sendiri.
-  assert.equal(c.ai.vision[0].baseUrl, 'https://api.z.ai/api/paas/v4')
-  assert.equal(c.ai.vision[0].apiKey, 'kz')
+  assert.equal(c.ai[0].baseUrl, 'https://generativelanguage.googleapis.com/v1beta/openai')
+  assert.equal(c.ai[1].baseUrl, c.ai[0].baseUrl)
+  assert.equal(c.ai[0].apiKey, 'kg')
+  assert.equal(c.ai[1].apiKey, 'kg')
 })
 
 test('slashing ganda di BASE_URL dibersihkan', () => {
-  const c = loadConfig({ ...FULL, AI_ZAI_BASE_URL: 'https://api.z.ai/api/paas/v4///' })
-  assert.equal(c.ai.chat[0].baseUrl, 'https://api.z.ai/api/paas/v4')
+  const c = loadConfig({ ...FULL, AI_BASE_URL: 'https://x.test/v1///' })
+  assert.equal(c.ai[0].baseUrl, 'https://x.test/v1')
 })
 
-test('AI_PROVIDERS kosong ditolak dengan penjelasan urutan fallback', () => {
-  assert.throws(() => loadConfig({ ...FULL, AI_PROVIDERS: '' }), /AI_PROVIDERS/)
-  assert.throws(() => loadConfig({ ...FULL, AI_PROVIDERS: ' , ' }), /AI_PROVIDERS/)
+test('AI_MODELS kosong ditolak dengan penjelasan urutan fallback', () => {
+  assert.throws(() => loadConfig({ ...FULL, AI_MODELS: '' }), /AI_MODELS/)
+  assert.throws(() => loadConfig({ ...FULL, AI_MODELS: ' , ' }), /AI_MODELS/)
 })
 
-test('nama provider dengan karakter aneh ditolak sebelum dicari env-nya', () => {
-  assert.throws(() => loadConfig({ ...FULL, AI_PROVIDERS: 'zai, te offline' }), /te offline/)
+test('AI_MODELS dengan spasi dan koma berlebih tetap terbaca', () => {
+  const c = loadConfig({ ...FULL, AI_MODELS: ' gemini-a , gemini-b ,' })
+  assert.deepEqual(c.ai.map((p) => p.model), ['gemini-a', 'gemini-b'])
 })
 
-test('provider tanpa salah satu variabel wajib ditolak, semua kekurangan disebut sekaligus', () => {
-  assert.throws(
-    () => loadConfig({ ...FULL, AI_ZAI_BASE_URL: '', AI_ZAI_MODEL: '' }),
-    /provider "zai" kurang: AI_ZAI_BASE_URL, AI_ZAI_MODEL/,
-  )
-})
-
-test('provider tanpa API key dilewati, tidak menolak start', () => {
-  // Empat provider di AI_PROVIDERS dengan tiga API key kosong adalah setup
-  // normal: cadangan hanya dipakai kalau kuncinya memang ada.
-  const c = loadConfig({ ...FULL, AI_PROVIDERS: 'zai,cloudflare,groq,openrouter' })
-  assert.deepEqual(c.ai.chat.map(p => p.name), ['zai', 'cloudflare'])
-})
-
-test('semua provider tanpa API key ditolak, bukan bot diam tanpa AI', () => {
-  const kosong = { BUSINESS_NAME: 'Toko', OWNER_NUMBER: '628123', AI_PROVIDERS: 'google,groq' }
-  assert.throws(() => loadConfig(kosong), /Tidak ada satu pun provider/)
-})
-
-test('provider yang API key-nya terisi tapi modelnya kosong tetap ditolak', () => {
-  assert.throws(
-    () => loadConfig({ ...FULL, AI_PROVIDERS: 'zai,groq', AI_GROQ_API_KEY: 'kg' }),
-    /provider "groq" kurang: AI_GROQ_BASE_URL, AI_GROQ_MODEL/,
-  )
+test('API key kosong ditolak, bukan bot diam tanpa AI', () => {
+  assert.throws(() => loadConfig({ ...FULL, AI_API_KEY: '' }), /AI_API_KEY/)
 })
 
 test('default terisi benar', () => {
@@ -144,7 +114,7 @@ test('batas nol atau negatif ditolak, bukan bikin bot berputar tanpa henti', () 
   // Nilai 0 bikin send gate menunggu selamanya sambil membakar CPU: tidak ada
   // timestamp yang pernah masuk, jadi tidak ada yang bisa kedaluwarsa. Bot
   // kelihatan hidup tapi tidak pernah membalas siapa pun.
-  for (const key of ['RATE_OUT_MAX', 'RATE_IN_MAX', 'RATE_OUT_WINDOW_SEC', 'RATE_IN_WINDOW_SEC']) {
+  for (const key of ['RATE_OUT_MAX', 'RATE_IN_MAX', 'RATE_IN_WINDOW_SEC', 'RATE_OUT_WINDOW_SEC']) {
     assert.throws(() => loadConfig({ ...FULL, [key]: '0' }), new RegExp(key), key)
     assert.throws(() => loadConfig({ ...FULL, [key]: '-1' }), new RegExp(key), key)
   }

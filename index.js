@@ -128,9 +128,13 @@ async function send(jid, text) {
 }
 
 let lastFailureNotice = 0
+// Notifikasi limit harian dibatasi per nomor, bukan global: satu masalah
+// kuota, tapi tiap pelanggan tetap perlu dijawab manusia.
+const lastQuotaNotice = new Map()
 
 async function notifyOwner(jid, question, reason) {
   const sistem = reason === 'sistem'
+  const quota = reason === 'quota'
   // Kegagalan sistem berulang tidak boleh membanjiri WhatsApp pemilik —
   // notifikasi bertubi-tubi itu sendiri sinyal bot. Eskalasi pengetahuan
   // dan handover ke admin tidak dibatasi: tiap kejadian perlu diketahui manusia.
@@ -138,10 +142,17 @@ async function notifyOwner(jid, question, reason) {
     if (Date.now() - lastFailureNotice < FAILURE_NOTICE_INTERVAL_MS) return
     lastFailureNotice = Date.now()
   }
+  if (quota) {
+    const last = lastQuotaNotice.get(jid) ?? 0
+    if (Date.now() - last < FAILURE_NOTICE_INTERVAL_MS) return
+    lastQuotaNotice.set(jid, Date.now())
+  }
 
   let title
   if (reason === 'handover') {
     title = '⚠️ Bot gagal menghubungi AI (setelah 5x coba). Chat dialihkan ke admin.'
+  } else if (reason === 'quota') {
+    title = '⚠️ Semua model AI kena limit harian. Chat dialihkan ke admin.'
   } else if (reason === 'gambar-gagal') {
     title = '📷 Pelanggan mengirim foto tapi gagal diunduh sistem.'
   } else if (sistem) {
@@ -156,7 +167,7 @@ async function notifyOwner(jid, question, reason) {
     `Nomor: ${jid.split('@')[0]}`,
     `Pesan: ${question}`,
   ]
-  if (sistem || reason === 'handover' || reason === 'gambar-gagal') {
+  if (sistem || reason === 'handover' || reason === 'quota' || reason === 'gambar-gagal') {
     body.push('', 'Silakan balas atau cek langsung chat pelanggan dari HP.')
   }
   await send(OWNER_JID, body.join('\n'))
@@ -200,7 +211,7 @@ async function processMessage(jid, items) {
   await sock.sendPresenceUpdate('composing', jid).catch(() => { })
   await sleep(1000 + Math.random() * 2000)
 
-  const { reply, escalated, failed, waited, answeredBy, model, attempts } = await ai.ask({
+  const { reply, escalated, failed, waited, answeredBy, model, attempts, reason } = await ai.ask({
     jid,
     text,
     image,
@@ -211,16 +222,16 @@ async function processMessage(jid, items) {
     shouldStop: () => takeover.isPaused(jid),
   })
   // Model yang menjawab ikut tampil di console: kalau balasannya aneh, ini
-  // pertanyaan pertama yang perlu dijawab — provider mana yang sedang dipakai.
+  // pertanyaan pertama yang perlu dijawab — model mana yang sedang dipakai.
   console.log(
     failed
-      ? `[ai] ${jid.split('@')[0]}: gagal semua provider (${attempts} percobaan)`
+      ? `[ai] ${jid.split('@')[0]}: gagal semua model (${attempts} percobaan, sebab: ${reason})`
       : `[ai] ${jid.split('@')[0]}: ${answeredBy}/${model} (percobaan ${attempts})`,
   )
-  // Nama provider yang menjawab + jumlah percobaan. Ini yang membuat
-  // pertanyaan "mana provider yang dipakai" bisa dijawab dari log, bukan
+  // Model yang menjawab + jumlah percobaan. Ini yang membuat
+  // pertanyaan "model mana yang dipakai" bisa dijawab dari log, bukan
   // dari tebakan.
-  log({ jid, dir: 'ai', text: null, adaGambar: Boolean(image), eskalasi: escalated, sebab: failed ? 'ai-gagal-total' : 'ai-berhasil', provider: answeredBy, model, percobaan: attempts })
+  log({ jid, dir: 'ai', text: null, adaGambar: Boolean(image), eskalasi: escalated, sebab: failed ? 'ai-gagal-total' : 'ai-berhasil', provider: answeredBy, model, percobaan: attempts, sebabDetail: reason })
   saveHistory()
 
   // Jika chat diambil alih oleh pemilik saat bot sedang retry, jangan kirim balasan bot lagi
@@ -228,11 +239,12 @@ async function processMessage(jid, items) {
     return
   }
 
-  // Jika setelah 5x coba AI tetap gagal, alihkan chat ke admin:
+  // Jika semua model gagal (error atau kena limit harian), alihkan chat
+  // ke admin: pelanggan tetap dapat jawaban manusia.
   if (failed) {
     takeover.pause(jid)
     await send(jid, HANDOVER_MESSAGE)
-    await notifyOwner(jid, text || '[gambar]', 'handover')
+    await notifyOwner(jid, text || '[gambar]', reason === 'quota-harian' ? 'quota' : 'handover')
     return
   }
 

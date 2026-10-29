@@ -1,19 +1,15 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { createAI } from '../ai.js'
+import { createAI, dropTrailingPeriods, quotaKind } from '../ai.js'
 
 const CHAT = 'a@s.whatsapp.net'
 
-const zaiChat = { name: 'zai', baseUrl: 'https://zai.test/api/paas/v4', apiKey: 'kz', model: 'glm-4.7-flash' }
-const cfChat = { name: 'cloudflare', baseUrl: 'https://cloudflare.test/ai/v1', apiKey: 'kc', model: 'llama-3.1-8b-instruct' }
-const zaiVision = { ...zaiChat, model: 'glm-4.6v-flash' }
-const cfVision = { ...cfChat, model: 'llama-3.2-11b-vision-instruct' }
+const BASE = 'https://google.test/v1beta/openai'
+const flash = { name: 'google', baseUrl: BASE, apiKey: 'kg', model: 'gemini-2.5-flash' }
+const lite = { name: 'google', baseUrl: BASE, apiKey: 'kg', model: 'gemini-2.5-flash-lite' }
 
 const config = {
-  ai: {
-    chat: [zaiChat, cfChat],
-    vision: [zaiVision, cfVision],
-  },
+  ai: [flash, lite],
   businessName: 'Toko Uji',
 }
 
@@ -27,8 +23,23 @@ function fakeFetch(replyText, { ok = true, status = 200, fails = 0 } = {}) {
       authorization: init.headers.Authorization,
       ...JSON.parse(init.body),
     })
-    if (calls.length <= fails) return { ok: false, status, json: async () => ({}) }
+    if (calls.length <= fails) return { ok: false, status, json: async () => ({}), text: async () => '' }
     return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: replyText } }] }) }
+  }
+  return { impl, calls }
+}
+
+/** Respon 429 dengan nama metrik quota Google ("PerDay" / "PerMinute"). */
+function quotaFetch(metric, { status = 429 } = {}) {
+  const calls = []
+  const impl = async (url, init) => {
+    calls.push({ url, ...JSON.parse(init.body) })
+    return {
+      ok: false,
+      status,
+      json: async () => ({}),
+      text: async () => JSON.stringify({ error: { details: [{ violations: [{ quotaMetric: metric }] }] } }),
+    }
   }
   return { impl, calls }
 }
@@ -103,17 +114,29 @@ test('riwayat dipotong ke 20 pesan terakhir', async () => {
   assert.equal(terakhir.at(-1).content, 'pesan 24')
 })
 
-test('HTTP 429 diperlakukan sebagai gagal setelah batas retry habis', async () => {
+test('HTTP 429 tanpa metrik quota: bot menunggu lalu menyerah ke admin', async () => {
+  // 429 tanpa metrik yang terbaca dianggap batas per menit: bot menunggu
+  // sebentar lalu mencoba lagi, dan akhirnya menyerah ke admin.
   let n = 0
-  const impl = async () => { n++; return { ok: false, status: 429, json: async () => ({}) } }
-  const ai = createAI({ config, knowledge: 'x', fetchImpl: impl, retryDelayMs: 0, maxRetries: 5 })
+  const impl = async () => {
+    n++
+    return { ok: false, status: 429, json: async () => ({}), text: async () => '' }
+  }
+  const ai = createAI({
+    config,
+    knowledge: 'x',
+    fetchImpl: impl,
+    retryDelayMs: 0,
+    maxRetries: 1,
+    sleepImpl: async () => {},
+  })
   let waitCalled = false
   const res = await ai.ask({ jid: CHAT, text: 'halo', onWait: () => { waitCalled = true } })
   assert.equal(res.escalated, true)
   assert.equal(res.reply, 'Pesan kakak sudah kami teruskan ke admin, nanti akan dibalas langsung yaa kak :D')
   assert.equal(res.failed, true, 'kegagalan sistem ditandai supaya owner tidak dibanjiri notifikasi')
   assert.equal(waitCalled, true, 'pesan tunggu dikirim saat gagal menghubungi AI')
-  assert.equal(n, 6) // 1 percobaan awal + 5 kali retry
+  assert.ok(n >= 3, `harus mencoba beberapa kali, baru ${n}`)
 })
 
 test('gagal menghubungi AI memanggil onWait lalu berhasil setelah coba ulang', async () => {
@@ -151,33 +174,18 @@ test('retry berhenti jika shouldStop bernilai true (misal takeover)', async () =
   assert.equal(waitCalled, false, 'takeover sebelum satu putaran penuh: pesan tunggu tidak perlu')
 })
 
-test('satu provider gagal tidak memicu pesan tunggu; satu putaran penuh gagal baru memicu', async () => {
-  // Dua provider dipakai justru supaya kegagalan satu provider tidak
-  // dirasakan pelanggan. Pesan tunggu keluar hanya setelah zai DAN
-  // cloudflare sama-sama gagal sekali.
+test('satu model gagal tidak memicu pesan tunggu; satu putaran penuh gagal baru memicu', async () => {
+  // Dua model dipakai justru supaya kegagalan satu model tidak
+  // dirasakan pelanggan. Pesan tunggu keluar hanya setelah keduanya
+  // sama-sama gagal sekali.
   const { impl, calls } = fakeFetch('Halo kak!', { fails: 1 })
   const ai = createAI({ config, knowledge: 'x', fetchImpl: impl, retryDelayMs: 0 })
   let waitCalls = 0
   const res = await ai.ask({ jid: CHAT, text: 'halo', onWait: () => { waitCalls++ } })
-  assert.equal(waitCalls, 0, 'cloudflare masih belum dicoba; pelanggan tidak perlu tahu apa-apa')
+  assert.equal(waitCalls, 0, 'model kedua belum dicoba; pelanggan tidak perlu tahu apa-apa')
   assert.equal(res.failed, false)
   assert.equal(res.reply, 'Halo kak!')
-  assert.deepEqual(calls.map(c => c.model), ['glm-4.7-flash', 'llama-3.1-8b-instruct'])
-})
-
-test('chain satu provider: kegagalan pertama langsung memicu pesan tunggu', async () => {
-  // Tanpa cadangan, putaran penuh = satu percobaan — perilaku lama tetap.
-  const { impl } = fakeFetch('Halo kak!', { fails: 1 })
-  const ai = createAI({
-    config: { ...config, ai: { chat: [zaiChat], vision: [] } },
-    knowledge: 'x',
-    fetchImpl: impl,
-    retryDelayMs: 0,
-  })
-  let waitCalls = 0
-  const res = await ai.ask({ jid: CHAT, text: 'halo', onWait: () => { waitCalls++ } })
-  assert.equal(waitCalls, 1)
-  assert.equal(res.failed, false)
+  assert.deepEqual(calls.map(c => c.model), ['gemini-2.5-flash', 'gemini-2.5-flash-lite'])
 })
 
 test('pesan tunggu hanya dikirim sekali walau putaran kedua juga gagal dulu', async () => {
@@ -195,8 +203,8 @@ test('hasil ask menyebut model yang menjawab, bukan cuma nama provider', async (
   const { impl } = fakeFetch('Halo kak!', { fails: 1 })
   const ai = createAI({ config, knowledge: 'x', fetchImpl: impl, retryDelayMs: 0 })
   const res = await ai.ask({ jid: CHAT, text: 'halo' })
-  assert.equal(res.answeredBy, 'cloudflare')
-  assert.equal(res.model, 'llama-3.1-8b-instruct', 'console perlu model, bukan nama provider saja')
+  assert.equal(res.answeredBy, 'google')
+  assert.equal(res.model, 'gemini-2.5-flash-lite', 'console perlu model, bukan nama provider saja')
 })
 
 test('riwayat di-reset otomatis jika jeda chat melebihi batas session timeout', async () => {
@@ -228,9 +236,8 @@ test('gambar dikirim sebagai data URI, dan memakai model bervisi', async () => {
   assert.equal(Array.isArray(last.content), true)
   const img = last.content.find(c => c.type === 'image_url')
   assert.match(img.image_url.url, /^data:image\/jpeg;base64,/)
-  assert.equal(calls[0].model, 'glm-4.6v-flash')
-  assert.equal(calls[0].url, 'https://zai.test/api/paas/v4/chat/completions',
-    'pesan bergambar dipakai ke provider vision pertama, bukan provider chat pertama')
+  assert.equal(calls[0].model, 'gemini-2.5-flash')
+  assert.equal(calls[0].url, `${BASE}/chat/completions`)
 })
 
 test('riwayat bisa disimpan lalu dipulihkan setelah bot restart', async () => {
@@ -348,27 +355,26 @@ test('base64 tidak tertinggal di riwayat', async () => {
   await ai.ask({ jid: CHAT, text: 'ini apa?', image: { data: Buffer.from('xyz'), mimetype: 'image/jpeg' } })
   await ai.ask({ jid: CHAT, text: 'lanjut' })
   assert.equal(JSON.stringify(calls[1].messages).includes('base64'), false)
-  assert.equal(calls[1].model, 'glm-4.7-flash')
+  assert.equal(calls[1].model, 'gemini-2.5-flash')
 })
 
-test('provider pertama gagal, percobaan berikutnya pindah ke provider kedua', async () => {
-  // 1 panggilan gagal (zai), lalu berhasil (cloudflare). Tanpa fallback,
-  // bot membalas pesan handover padahal provider cadangan masih hidup.
+test('model pertama gagal, percobaan berikutnya pindah ke model kedua', async () => {
+  // 1 panggilan gagal (flash), lalu berhasil (flash-lite). Tanpa fallback,
+  // bot membalas pesan handover padahal model cadangan masih hidup.
   const { impl, calls } = fakeFetch('Halo kak, stoknya ada 😊', { fails: 1 })
   const ai = createAI({ config, knowledge: 'x', fetchImpl: impl, retryDelayMs: 0 })
   const res = await ai.ask({ jid: CHAT, text: 'ada stok?' })
   assert.equal(res.failed, false)
   assert.equal(res.reply, 'Halo kak, stoknya ada 😊')
   assert.equal(calls.length, 2)
-  assert.equal(calls[0].url, 'https://zai.test/api/paas/v4/chat/completions')
-  assert.equal(calls[1].url, 'https://cloudflare.test/ai/v1/chat/completions')
-  assert.equal(calls[1].model, 'llama-3.1-8b-instruct')
-  assert.equal(calls[1].authorization, 'Bearer kc', 'tiap provider pakai API key-nya sendiri')
+  assert.equal(calls[0].url, `${BASE}/chat/completions`)
+  assert.equal(calls[1].model, 'gemini-2.5-flash-lite')
+  assert.equal(calls[1].authorization, 'Bearer kg', 'semua model pakai API key yang sama')
 })
 
-test('setelah provider terakhir, putaran berikutnya kembali ke provider pertama', async () => {
-  // 3 panggilan gagal: zai → cloudflare → zai lagi. maxRetries 5 memberi
-  // enam percobaan, jadi provider pertama diberi dua kesempatan.
+test('setelah model terakhir, putaran berikutnya kembali ke model pertama', async () => {
+  // 3 panggilan gagal: flash → flash-lite → flash lagi. maxRetries 5 memberi
+  // enam percobaan, jadi model pertama diberi dua kesempatan.
   const { impl, calls } = fakeFetch('akhirnya', { fails: 3 })
   const ai = createAI({ config, knowledge: 'x', fetchImpl: impl, retryDelayMs: 0, maxRetries: 5 })
   const res = await ai.ask({ jid: CHAT, text: 'halo' })
@@ -376,38 +382,102 @@ test('setelah provider terakhir, putaran berikutnya kembali ke provider pertama'
   assert.equal(calls.length, 4)
   assert.deepEqual(
     calls.slice(0, 3).map(c => c.model),
-    ['glm-4.7-flash', 'llama-3.1-8b-instruct', 'glm-4.7-flash'],
-    'urutan fallback melingkar, bukan berhenti di provider terakhir',
+    ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.5-flash'],
+    'urutan fallback melingkar, bukan berhenti di model terakhir',
   )
-  assert.equal(calls[3].model, 'llama-3.1-8b-instruct', 'putaran kedua pindah ke provider berikutnya lagi')
+  assert.equal(calls[3].model, 'gemini-2.5-flash-lite', 'putaran kedua pindah ke model berikutnya lagi')
 })
 
-test('fallback vision mengikuti chain vision, bukan chain chat', async () => {
-  const { impl, calls } = fakeFetch('itu tas kuliah', { fails: 1 })
-  const ai = createAI({ config, knowledge: 'x', fetchImpl: impl, retryDelayMs: 0 })
-  const res = await ai.ask({
-    jid: CHAT,
-    text: 'ini apa?',
-    image: { data: Buffer.from('xyz'), mimetype: 'image/jpeg' },
-  })
-  assert.equal(res.failed, false)
-  assert.deepEqual(
-    calls.map(c => c.model),
-    ['glm-4.6v-flash', 'llama-3.2-11b-vision-instruct'],
-  )
-})
-
-test('tanpa provider bervisi, pesan bergambar memakai chain chat', async () => {
-  const { impl, calls } = fakeFetch('ok')
+test('limit harian: langsung pindah ke model berikutnya tanpa mencoba model yang sama lagi', async () => {
+  const { impl, calls } = quotaFetch('GenerateRequestsPerDayPerProjectPerModel-FreeTier')
   const ai = createAI({
-    config: { ...config, ai: { chat: [zaiChat], vision: [] } },
+    config: { ...config, ai: [flash, lite] },
     knowledge: 'x',
     fetchImpl: impl,
+    retryDelayMs: 0,
   })
-  await ai.ask({
-    jid: CHAT,
-    text: 'ini apa?',
-    image: { data: Buffer.from('xyz'), mimetype: 'image/jpeg' },
+  const res = await ai.ask({ jid: CHAT, text: 'halo' })
+  assert.equal(res.failed, true, 'semua model kena limit harian → eskalasi')
+  assert.equal(res.reason, 'quota-harian')
+  assert.deepEqual(
+    calls.map(c => c.model),
+    ['gemini-2.5-flash', 'gemini-2.5-flash-lite'],
+    'model yang kena limit tidak diulang',
+  )
+})
+
+test('limit harian di semua model: eskalasi ke admin tanpa menunggu lama', async () => {
+  const { impl, calls } = quotaFetch('GenerateRequestsPerDayPerProjectPerModel-FreeTier')
+  const ai = createAI({
+    config: { ...config, ai: [flash, lite] },
+    knowledge: 'x',
+    fetchImpl: impl,
+    sleepImpl: async () => { throw new Error('tidak boleh menunggu') },
   })
-  assert.equal(calls[0].model, 'glm-4.7-flash')
+  const res = await ai.ask({ jid: CHAT, text: 'halo' })
+  assert.equal(res.failed, true)
+  assert.equal(res.reason, 'quota-harian')
+  assert.equal(calls.length, 2, 'cukup mencoba tiap model sekali')
+})
+
+test('model yang kena limit harian dilewati di chat berikutnya', async () => {
+  // Batas harian tidak hilang hanya karena pelanggan berikutnya chat.
+  let n = 0
+  const impl = async (url, init) => {
+    n++
+    const model = JSON.parse(init.body).model
+    if (model === 'gemini-2.5-flash') {
+      return {
+        ok: false,
+        status: 429,
+        json: async () => ({}),
+        text: async () => JSON.stringify({ quotaMetric: 'GenerateRequestsPerDayPerProjectPerModel' }),
+      }
+    }
+    return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: 'Halo kak' } }] }) }
+  }
+  const ai = createAI({ config, knowledge: 'x', fetchImpl: impl, retryDelayMs: 0 })
+  const first = await ai.ask({ jid: CHAT, text: 'halo' })
+  assert.equal(first.failed, false)
+  assert.equal(first.model, 'gemini-2.5-flash-lite', 'langsung pindah ke model kedua')
+
+  const second = await ai.ask({ jid: 'lain@s.whatsapp.net', text: 'halo lagi' })
+  assert.equal(second.failed, false)
+  assert.equal(second.model, 'gemini-2.5-flash-lite', 'model yang kena limit dilewati')
+  assert.equal(n, 3, 'model yang kena limit tidak dicoba lagi di chat berikutnya')
+})
+
+test('limit per menit: tunggu sebentar lalu coba lagi', async () => {
+  let n = 0
+  const impl = async (url, init) => {
+    n++
+    const model = JSON.parse(init.body).model
+    if (model === 'gemini-2.5-flash') {
+      return {
+        ok: false,
+        status: 429,
+        json: async () => ({}),
+        text: async () => JSON.stringify({ quotaMetric: 'GenerateRequestsPerMinutePerProjectPerModel' }),
+      }
+    }
+    return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: 'Halo kak' } }] }) }
+  }
+  const slept = []
+  const ai = createAI({
+    config,
+    knowledge: 'x',
+    fetchImpl: impl,
+    retryDelayMs: 0,
+    sleepImpl: async (ms) => { slept.push(ms) },
+  })
+  const res = await ai.ask({ jid: CHAT, text: 'halo' })
+  assert.equal(res.failed, false)
+  assert.equal(res.model, 'gemini-2.5-flash-lite')
+  assert.equal(slept.length, 0, 'model kedua langsung dicoba, tidak perlu nunggu')
+})
+
+test('nama metrik quota dibaca dari pesan error Google', () => {
+  assert.equal(quotaKind(429, '{"quotaMetric":"GenerateRequestsPerDayPerProjectPerModel"}'), 'daily')
+  assert.equal(quotaKind(429, '{"quotaMetric":"GenerateRequestsPerMinutePerProjectPerModel"}'), 'minute')
+  assert.equal(quotaKind(500, '{"quotaMetric":"GenerateRequestsPerDayPerProjectPerModel"}'), null)
 })

@@ -11,7 +11,7 @@ berasal dari `knowledge.md`.
 
 - Node.js 20 atau lebih baru (dites di 24)
 - Nomor WhatsApp yang mau dipakai bot
-- API key provider AI yang OpenAI-compatible
+- API key Google AI Studio
 
 ## Setup
 
@@ -24,9 +24,8 @@ Buka `.env`, isi minimal lima ini:
 
 | Variabel | Isi |
 |---|---|
-| `AI_PROVIDERS` | Nama provider dipisah koma, misal `google,cloudflare,groq,openrouter` — urutan = urutan fallback |
-| `AI_GOOGLE_API_KEY` | API key Google AI Studio (nama variabel mengikuti nama provider) |
-| `AI_GOOGLE_MODEL` | ID model, misal `gemini-2.5-flash` |
+| `AI_API_KEY` | API key Google AI Studio |
+| `AI_MODELS` | ID model dipisah koma, misal `gemini-2.5-flash,gemini-2.5-flash-lite` — urutan = urutan fallback |
 | `BUSINESS_NAME` | Nama usahamu — dipakai di system prompt |
 | `OWNER_NUMBER` | Nomormu, format `62812...` tanpa tanda plus |
 
@@ -56,8 +55,7 @@ jalankan ulang dan scan lagi.
 1. Push project ke Git
 2. Deploy ke Railway dari repo
 3. Tambahkan Variables di Railway:
-   - `AI_PROVIDERS`
-   - `AI_GOOGLE_API_KEY`, `AI_GOOGLE_MODEL` (nama variabel mengikuti nama provider)
+   - `AI_API_KEY`, `AI_MODELS`
    - `BUSINESS_NAME`
    - `OWNER_NUMBER`
    - (Opsional) `QR_TOKEN` — kalau kosong, token acak dibuat tiap boot
@@ -72,11 +70,9 @@ otomatis tanpa perlu scan ulang.
 
 | Variabel | Default | Keterangan |
 |---|---|---|
-| `AI_PROVIDERS` | — | **Wajib.** Nama provider dipisah koma, urutan = urutan fallback |
-| `AI_<NAMA>_BASE_URL` | — | **Wajib** per provider. Endpoint OpenAI-compatible |
-| `AI_<NAMA>_API_KEY` | — | **Wajib** per provider |
-| `AI_<NAMA>_MODEL` | — | **Wajib** per provider. ID model teks |
-| `AI_<NAMA>_VISION_MODEL` | — | Opsional per provider. Model untuk pesan bergambar; tanpa satu pun, gambar memakai chain teks |
+| `AI_BASE_URL` | endpoint Google | Endpoint OpenAI-compatible. Ganti hanya kalau pakai proxy sendiri |
+| `AI_API_KEY` | — | **Wajib.** API key Google AI Studio |
+| `AI_MODELS` | — | **Wajib.** ID model dipisah koma, urutan = urutan fallback |
 | `BUSINESS_NAME` | — | **Wajib** |
 | `OWNER_NUMBER` | — | **Wajib.** Tujuan eskalasi |
 | `ACCESS_MODE` | `PUBLIC` | `PUBLIC` atau `WHITELIST` |
@@ -95,39 +91,34 @@ terlalu cepat — yang hidup bulan ini bisa mati bulan depan. Kalau bot tiba-tib
 membalas "sedang sibuk" padahal API key benar, cek dulu apakah modelnya masih
 ada.
 
-## Multi-provider dan fallback
+## Fallback antar model
 
-Urutan di `AI_PROVIDERS` adalah urutan fallback. Contoh:
+Provider tunggal: Google AI Studio. Yang dibedakan adalah modelnya. Urutan di
+`AI_MODELS` adalah urutan fallback:
 
 ```env
-AI_PROVIDERS=google,cloudflare,groq,openrouter
+AI_MODELS=gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.0-flash
 ```
 
-Setiap pesan dicoba ke provider pertama dulu. Kalau gagal — error HTTP,
-timeout, respons rusak — percobaan berikutnya pindah ke provider kedua, dan
-setelah provider terakhir putar kembali ke yang pertama, sampai batas retry
-habis. Pelanggan tetap dibalas selama minimal satu provider hidup; provider
-mati tidak membuat bot membalas "sedang sibuk".
+Setiap pesan dicoba ke model pertama dulu. Kalau gagal — error HTTP, timeout,
+respons rusak — percobaan berikutnya pindah ke model kedua, dan setelah model
+terakhir putar kembali ke yang pertama, sampai batas retry habis.
 
-Provider yang `AI_<NAMA>_API_KEY`-nya kosong dilewati, jadi kamu tidak wajib
-mengisi keempat API key sekaligus. Minimal satu provider harus terisi; API key
-terisi tapi `MODEL` kosong tetap ditolak.
+Kalau model kena limit (HTTP 429), bot **tidak** mengulang model yang sama.
+Langsung pindah ke model berikutnya, dan model itu ditandai agar tidak
+dicoba lagi di chat berikutnya:
 
-Setup yang dianjurkan:
+- **Limit per menit** — ditunggu sebentar, lalu dicoba lagi.
+- **Limit harian** — model itu dianggur satu jam. Kalau **semua** model kena
+  limit harian, bot berhenti menunggu dan langsung mengeskalasi ke kamu:
+  pelanggan dapat pesan "sudah kami teruskan ke admin" dan kamu diberi tahu.
 
-| Peran | Provider | Model |
-|---|---|---|
-| Utama | Google AI Studio | `gemini-2.5-flash` |
-| Cadangan 1 | Cloudflare Workers AI | `@cf/meta/llama-3.1-8b-instruct` |
-| Cadangan 2 | Groq | `llama-3.3-70b-versatile` |
-| Cadangan 3 | OpenRouter | `meta-llama/llama-3.3-70b-instruct:free` |
-| Vision utama | Google AI Studio | `gemini-2.5-flash` |
-| Vision cadangan | Cloudflare Workers AI | `@cf/meta/llama-3.2-11b-vision-instruct` |
+Batas harian Google direset tengah malam waktu Pasifik (± 14:00 WIB). Bot
+tahu jenis limitnya dari nama metrik di pesan error Google (`PerDay` vs
+`PerMinute`), jadi tidak perlu tebak.
 
-Chain vision terpisah dari chain teks: hanya provider yang punya
-`AI_<NAMA>_VISION_MODEL` yang ikut menangani pesan bergambar. Kalau tidak ada
-satu pun provider yang menyetel `VISION_MODEL`, pesan bergambar memakai chain
-teks.
+Semua model Google bisa melihat gambar, jadi pesan bergambar memakai chain
+yang sama dengan pesan teks.
 
 ## Cache jawaban
 

@@ -114,7 +114,7 @@ test('batas nol atau negatif ditolak, bukan bikin bot berputar tanpa henti', () 
   // Nilai 0 bikin send gate menunggu selamanya sambil membakar CPU: tidak ada
   // timestamp yang pernah masuk, jadi tidak ada yang bisa kedaluwarsa. Bot
   // kelihatan hidup tapi tidak pernah membalas siapa pun.
-  for (const key of ['RATE_OUT_MAX', 'RATE_IN_MAX', 'RATE_IN_WINDOW_SEC', 'RATE_OUT_WINDOW_SEC']) {
+  for (const key of ['RATE_OUT_MAX', 'RATE_IN_MAX', 'RATE_IN_WINDOW_SEC', 'RATE_OUT_WINDOW_SEC', 'MAX_IMAGE_MB']) {
     assert.throws(() => loadConfig({ ...FULL, [key]: '0' }), new RegExp(key), key)
     assert.throws(() => loadConfig({ ...FULL, [key]: '-1' }), new RegExp(key), key)
   }

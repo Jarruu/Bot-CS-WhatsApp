@@ -84,7 +84,10 @@ otomatis tanpa perlu scan ulang.
 | `RATE_OUT_MAX` | `15` | Batas pesan keluar, lintas semua chat |
 | `RATE_OUT_WINDOW_SEC` | `60` | Jendela waktu batas keluar |
 | `CHUNK_DELAY_SEC` | `1` | Jeda antar potongan balasan panjang |
-| `MAX_IMAGE_MB` | `5` | Gambar lebih besar dari ini dilewati |
+| `MAX_IMAGE_MB` | `5` | Gambar lebih besar dari ini dilewati. Maksimal 4 gambar per giliran |
+| `TAKEOVER_PAUSE_MIN` | `30` | Lama bot diam di satu chat setelah kamu balas manual |
+| `PUBLIC_URL` | — | URL publik server, untuk link halaman QR di host selain Railway |
+| `LOG_LEVEL` | `warn` | Tingkat log internal Baileys. Pakai `info` saat menelusuri masalah koneksi |
 
 **ID model sengaja tidak ditanam di kode.** Daftar model gratis bergerak
 terlalu cepat — yang hidup bulan ini bisa mati bulan depan. Kalau bot tiba-tiba
@@ -120,18 +123,6 @@ tahu jenis limitnya dari nama metrik di pesan error Google (`PerDay` vs
 Semua model Google bisa melihat gambar, jadi pesan bergambar memakai chain
 yang sama dengan pesan teks.
 
-## Cache jawaban
-
-Pertanyaan yang berulang — jam buka, ongkir, cara bayar — dijawab dari cache
-di memori tanpa memanggil LLM. Kuncinya teks yang sudah dinormalkan (huruf
-kecil, tanda baca dibuang), jadi "Jam buka?" dan "jam buka" dianggap sama dan
-berlaku lintas pelanggan.
-
-Yang tidak pernah di-cache: pesan bergambar, pertanyaan di bawah 6 karakter atau
-di atas 60 karakter (jawabannya bergantung konteks chat), dan jawaban yang
-dieskalasi. Cache hilang saat bot restart — itu disengaja, supaya jawaban lama
-tidak bertahan setelah `knowledge.md` diperbarui.
-
 ## Menyetel batas
 
 Angka di `.env` adalah titik awal, bukan hasil pengukuran. Jalankan seminggu,
@@ -160,9 +151,14 @@ hitungan kilobyte.
 
 ## Takeover manual
 
-Balas manual di sebuah chat, dan bot berhenti membalas di chat itu selama 30
-menit. Balasan bot sendiri dikenali lewat ID pesannya, jadi bot tidak salah
-menganggap dirinya manusia.
+Balas manual di sebuah chat, dan bot berhenti membalas di chat itu selama
+`TAKEOVER_PAUSE_MIN` menit (default 30). Kirim `!bot` atau `!resume` dari HP
+untuk mengaktifkan bot lagi lebih cepat. Balasan bot sendiri dikenali lewat ID
+pesannya, jadi bot tidak salah menganggap dirinya manusia.
+
+Eskalasi biasa **tidak** mem-pause chat: bot tetap menjawab pertanyaan
+berikutnya. Bot hanya mundur saat jawabannya kosong (benar-benar tidak tahu)
+atau saat semua model AI gagal.
 
 ## Risiko
 

@@ -12,8 +12,11 @@ export const qrToken = process.env.QR_TOKEN?.trim() || randomBytes(9).toString('
 
 /** URL yang perlu dibuka di HP, lengkap dengan tokennya. */
 export function qrPageUrl(port) {
+  // Railway mengisi RAILWAY_PUBLIC_DOMAIN, host lain (Sillydev, VPS) isi
+  // PUBLIC_URL. Tanpa keduanya, localhost tidak bisa dibuka dari HP.
   const domain = process.env.RAILWAY_PUBLIC_DOMAIN
-  return `${domain ? `https://${domain}` : `http://localhost:${port}`}/qr?key=${qrToken}`
+  const base = process.env.PUBLIC_URL?.replace(/\/+$/, '') || (domain ? `https://${domain}` : `http://localhost:${port}`)
+  return `${base}/qr?key=${qrToken}`
 }
 
 const esc = (s) =>
@@ -67,7 +70,7 @@ function page({ businessName, key }) {
   <button onclick="location.reload()">Muat ulang</button>
 </main>
 <script>
-  const KEY = ${JSON.stringify(key)}
+  const KEY = ${JSON.stringify(key).replace(/</g, '\\u003c')}
   const TEXT = {
     starting: 'Menyiapkan bot…',
     waiting: 'Scan QR di bawah',
@@ -112,6 +115,7 @@ export function createQrServer({ getState, businessName = '', token = qrToken })
   // Polling tiap 2 detik tidak perlu menggencode ulang QR yang sama.
   let cachedFor = null
   let cachedPng = null
+  const rateLimit = new Map()
 
   return createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost')
@@ -122,6 +126,21 @@ export function createQrServer({ getState, businessName = '', token = qrToken })
 
     // Tanpa token: dipakai Railway untuk healthcheck, tidak membocorkan apa pun.
     if (url.pathname === '/health') return send(200, 'text/plain; charset=utf-8', 'ok')
+
+    // Rate limiting anti brute-force token (maks 60 request/menit per IP)
+    const ip = req.headers['x-forwarded-for']?.split(',')?.[0]?.trim() || req.socket.remoteAddress || 'ip'
+    const now = Date.now()
+    const requests = (rateLimit.get(ip) ?? []).filter((t) => now - t < 60_000)
+    if (requests.length >= 60) {
+      return send(429, 'text/plain; charset=utf-8', 'Terlalu banyak permintaan. Coba lagi dalam 1 menit.\n')
+    }
+    requests.push(now)
+    rateLimit.set(ip, requests)
+    if (rateLimit.size > 500) {
+      for (const [k, v] of rateLimit.entries()) {
+        if (!v.some((t) => now - t < 60_000)) rateLimit.delete(k)
+      }
+    }
 
     if (url.searchParams.get('key') !== token) {
       return send(401, 'text/plain; charset=utf-8',

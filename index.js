@@ -1,7 +1,7 @@
 // Perekat ke Baileys. File ini sengaja tipis: tidak ada logika yang bisa
 // diuji di sini, semuanya didelegasikan ke config.js, pipeline.js, dan ai.js.
 import 'dotenv/config'
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { makeWASocket, useMultiFileAuthState, DisconnectReason, downloadMediaMessage, DEFAULT_CONNECTION_CONFIG } from '@whiskeysockets/baileys'
 import qrcode from 'qrcode-terminal'
@@ -9,14 +9,20 @@ import qrcode from 'qrcode-terminal'
 import { loadConfig, loadKnowledge } from './config.js'
 import { createAI } from './ai.js'
 import {
-  extractText, extractImage, shouldIgnore, chunkText,
+  extractText, extractImage, isPassiveMessage, senderNumber, unreadableMedia, chunkText,
   createDebouncer, createRateLimiter, createSendGate, createQueue, createTakeover,
 } from './pipeline.js'
 import { createQrServer, qrPageUrl } from './server.js'
 
 // Baileys butuh logger di dua tempat, dan objeknya harus sama. Socket tidak
 // menyimpan logger-nya, jadi ambil dari default resminya.
-const LOGGER = DEFAULT_CONNECTION_CONFIG.logger
+//
+// Level default-nya `info`, dan Baileys mencatat setiap perubahan identity
+// key, setiap resync app-state, dan setiap retry dekripsi di level itu —
+// ratusan baris saat menyambung ulang, sampai log error asli tenggelam.
+// `warn` menyisakan yang benar-benar perlu dilihat. Pakai LOG_LEVEL=info
+// saat sedang menelusuri masalah koneksi.
+const LOGGER = DEFAULT_CONNECTION_CONFIG.logger.child({}, { level: process.env.LOG_LEVEL || 'warn' })
 
 // ---- Konfigurasi dulu, sebelum menyentuh Baileys -------------------------
 // Kalau .env kurang atau knowledge.md kosong, bot harus mati di sini dengan
@@ -52,16 +58,21 @@ function queueFor(jid) {
   if (!chatQueues.has(jid)) chatQueues.set(jid, createQueue())
   return chatQueues.get(jid)
 }
-const takeover = createTakeover({ pauseMs: 10 * 60 * 1000 })
+const TAKEOVER_PAUSE_MS = (Number(process.env.TAKEOVER_PAUSE_MIN) || 30) * 60 * 1000
+const takeover = createTakeover({ pauseMs: TAKEOVER_PAUSE_MS })
 
 const OWNER_JID = `${config.ownerNumber}@s.whatsapp.net`
 const WAIT_MESSAGE = 'Baik kak, mohon ditunggu sebentar yaa kak.'
 const HANDOVER_MESSAGE = 'Pesan kakak sudah kami teruskan ke admin, nanti akan dibalas langsung yaa kak :D'
-const UNSUPPORTED_MEDIA_MESSAGE = 'Maaf ya kak, saat ini bot TemanKita baru bisa membaca teks dan foto 📷 Boleh tolong diketik atau kirim foto saja yaa kak :D'
+const UNSUPPORTED_MEDIA_MESSAGE = `Maaf ya kak, saat ini bot ${config.businessName} baru bisa membaca pesan teks dan foto 📷 Kalau ada dokumen/file, boleh tolong kirim screenshot atau rinciannya lewat teks yaa kak :D`
 const RATE_LIMIT_MESSAGE = 'Baik kak, mohon tunggu sebentar yaa agar admin bisa memproses pesan sebelumnya :D'
 const EMPTY_REPLY = 'Maaf ya kak, aku belum bisa jawab itu 🙏 Aku tanyakan dulu ke admin, nanti dibalas ya kak :D'
 const IMAGE_TOO_BIG = 'Gambarnya kegedean jadi belum bisa aku buka 📷 Coba kirim ulang dengan ukuran lebih kecil ya kak :D'
 const IMAGE_FAILED = 'Gambarnya gagal aku buka 📷 Coba kirim ulang ya kak :D'
+// Empat gambar × 5 MB sudah 20 MB body request. Lebih dari itu provider
+// menolak dan seluruh balasan ikut hilang.
+const MAX_IMAGES_PER_TURN = 4
+const IMAGE_TOO_MANY = `Maaf kak, aku cuma bisa buka ${MAX_IMAGES_PER_TURN} gambar sekaligus 📷 Sisanya boleh dikirim lagi ya kak :D`
 const FAILURE_NOTICE_INTERVAL_MS = 15 * 60 * 1000
 
 const rateLimitNotified = new Map()
@@ -72,8 +83,16 @@ const now = () => new Date().toISOString()
 
 // ---- Log -----------------------------------------------------------------
 // Hanya teks dan penanda. Isi gambar maupun base64 tidak pernah masuk sini.
+// Log dirotasi supaya disk tidak penuh: satu file aktif, satu cadangan.
+const LOG_MAX_BYTES = 5 * 1_048_576
 function log(fields) {
   try {
+    if (statSync(LOG_FILE, { throwIfNoEntry: false })?.size > LOG_MAX_BYTES) {
+      // renameSync gagal di Windows kalau tujuan sudah ada, jadi cadangan
+      // lama dibuang dulu.
+      rmSync(`${LOG_FILE}.1`, { force: true })
+      renameSync(LOG_FILE, `${LOG_FILE}.1`)
+    }
     appendFileSync(LOG_FILE, `${JSON.stringify({ t: now(), ...fields })}\n`)
   } catch (err) {
     console.error('gagal menulis log:', err.message)
@@ -105,6 +124,17 @@ try {
 }
 
 // ---- Balasan -------------------------------------------------------------
+// Baileys butuh getMessage untuk mengirim ulang pesan yang gagal didekripsi
+// di HP penerima. Tanpa ini, balasan yang gagal sampai tidak bisa dipulihkan
+// otomatis. Cukup 50 pesan terakhir.
+const recentSent = new Map()
+function rememberSent(msg) {
+  const id = msg?.key?.id
+  if (!id) return
+  recentSent.set(id, msg)
+  if (recentSent.size > 50) recentSent.delete(recentSent.keys().next().value)
+}
+
 async function send(jid, text) {
   await sendGate.waitTurn()
   let sent
@@ -123,6 +153,7 @@ async function send(jid, text) {
     }
   }
   takeover.noteSent(sent?.key?.id)
+  rememberSent(sent)
   log({ jid, dir: 'out', text, adaGambar: false, eskalasi: false, sebab: null })
   return sent
 }
@@ -132,7 +163,7 @@ let lastFailureNotice = 0
 // kuota, tapi tiap pelanggan tetap perlu dijawab manusia.
 const lastQuotaNotice = new Map()
 
-async function notifyOwner(jid, question, reason) {
+async function notifyOwner(jid, question, reason, number = jid.split('@')[0]) {
   const sistem = reason === 'sistem'
   const quota = reason === 'quota'
   // Kegagalan sistem berulang tidak boleh membanjiri WhatsApp pemilik —
@@ -164,7 +195,7 @@ async function notifyOwner(jid, question, reason) {
   const body = [
     title,
     '',
-    `Nomor: ${jid.split('@')[0]}`,
+    `Nomor: ${number}`,
     `Pesan: ${question}`,
   ]
   if (sistem || reason === 'handover' || reason === 'quota' || reason === 'gambar-gagal') {
@@ -174,21 +205,32 @@ async function notifyOwner(jid, question, reason) {
 }
 
 async function processMessage(jid, items) {
-  const text = items.map((i) => i.text).filter(Boolean).join('\n')
-  const withImage = [...items].reverse().find((i) => i.image)
-  let image = null
+  const number = senderNumber(items[0]?.msg)
+  // Caption dokumen/video terbaca, tapi isinya tidak. Penanda ini yang
+  // mencegah model menjawab seolah-olah sudah membuka file-nya.
+  const attached = items.map((i) => i.media).filter(Boolean)
+  const text = [
+    items.map((i) => i.text).filter(Boolean).join('\n'),
+    ...attached.map((jenis) => `(catatan sistem: pelanggan melampirkan ${jenis} yang isinya tidak bisa dibuka. Minta screenshot atau rinciannya lewat teks)`),
+  ].filter(Boolean).join('\n')
+  const withImages = items.filter((i) => i.image)
+  const images = []
+  const maxBytes = limits.maxImageMb * 1_048_576
 
-  if (withImage) {
-    const bytes = Number(withImage.image.fileLength?.toNumber?.() ?? withImage.image.fileLength ?? 0)
-    if (bytes > limits.maxImageMb * 1_048_576) {
+  for (const item of withImages.slice(0, MAX_IMAGES_PER_TURN)) {
+    // fileLength dikirim oleh pengirim dan bisa kosong atau dipalsukan, jadi
+    // hanya dipakai sebagai saringan cepat. Batas sebenarnya dihitung dari
+    // byte yang benar-benar datang, supaya gambar raksasa tidak masuk RAM.
+    const declared = Number(item.image.fileLength?.toNumber?.() ?? item.image.fileLength ?? 0)
+    if (declared > maxBytes) {
       await send(jid, IMAGE_TOO_BIG)
       log({ jid, dir: 'out', text: IMAGE_TOO_BIG, adaGambar: false, eskalasi: false, sebab: 'gambar-besar' })
-      return
+      continue
     }
     try {
-      const buffer = await downloadMediaMessage(
-        withImage.msg,
-        'buffer',
+      const stream = await downloadMediaMessage(
+        item.msg,
+        'stream',
         {},
         // `logger` wajib ada di sini. Kalau media-nya sudah kedaluwarsa
         // (404/410), Baileys mencatat lewat ctx.logger SEBELUM memanggil
@@ -196,16 +238,39 @@ async function processMessage(jid, items) {
         // mati dan yang muncul malah TypeError yang menyesatkan.
         { reuploadRequest: sock.updateMediaMessage, logger: LOGGER },
       )
-      image = { data: buffer, mimetype: withImage.image.mimetype ?? 'image/jpeg' }
+      const chunks = []
+      let total = 0
+      for await (const chunk of stream) {
+        total += chunk.length
+        if (total > maxBytes) {
+          stream.destroy?.()
+          break
+        }
+        chunks.push(chunk)
+      }
+      if (total > maxBytes) {
+        await send(jid, IMAGE_TOO_BIG)
+        log({ jid, dir: 'out', text: IMAGE_TOO_BIG, adaGambar: false, eskalasi: false, sebab: 'gambar-besar' })
+        continue
+      }
+      images.push({ data: Buffer.concat(chunks), mimetype: item.image.mimetype ?? 'image/jpeg' })
     } catch (err) {
       // Kegagalan unduh tidak boleh naik ke atas: satu gambar rusak tidak
       // boleh menghentikan antrian untuk pelanggan lain.
       console.error('gagal mengunduh gambar:', err.message)
       await send(jid, IMAGE_FAILED)
-      await notifyOwner(jid, text || '[foto dari pelanggan]', 'gambar-gagal')
+      await notifyOwner(jid, text || '[foto dari pelanggan]', 'gambar-gagal', number)
       log({ jid, dir: 'out', text: IMAGE_FAILED, adaGambar: false, eskalasi: false, sebab: 'unduh-gagal' })
-      return
     }
+  }
+
+  if (withImages.length > MAX_IMAGES_PER_TURN) {
+    await send(jid, IMAGE_TOO_MANY)
+  }
+
+  // Jika pelanggan hanya kirim gambar tapi seluruh gambar gagal diunduh, tidak perlu panggil AI
+  if (withImages.length > 0 && images.length === 0 && !text) {
+    return
   }
 
   await sock.sendPresenceUpdate('composing', jid).catch(() => { })
@@ -214,10 +279,10 @@ async function processMessage(jid, items) {
   const { reply, escalated, failed, waited, answeredBy, model, attempts, reason } = await ai.ask({
     jid,
     text,
-    image,
+    images,
     onWait: async () => {
       await send(jid, WAIT_MESSAGE)
-      await notifyOwner(jid, text || '[gambar]', 'sistem')
+      await notifyOwner(jid, text || '[gambar]', 'sistem', number)
     },
     shouldStop: () => takeover.isPaused(jid),
   })
@@ -225,13 +290,13 @@ async function processMessage(jid, items) {
   // pertanyaan pertama yang perlu dijawab — model mana yang sedang dipakai.
   console.log(
     failed
-      ? `[ai] ${jid.split('@')[0]}: gagal semua model (${attempts} percobaan, sebab: ${reason})`
-      : `[ai] ${jid.split('@')[0]}: ${answeredBy}/${model} (percobaan ${attempts})`,
+      ? `[ai] ${number}: gagal semua model (${attempts} percobaan, sebab: ${reason})`
+      : `[ai] ${number}: ${answeredBy}/${model} (percobaan ${attempts})`,
   )
   // Model yang menjawab + jumlah percobaan. Ini yang membuat
   // pertanyaan "model mana yang dipakai" bisa dijawab dari log, bukan
   // dari tebakan.
-  log({ jid, dir: 'ai', text: null, adaGambar: Boolean(image), eskalasi: escalated, sebab: failed ? 'ai-gagal-total' : 'ai-berhasil', provider: answeredBy, model, percobaan: attempts, sebabDetail: reason })
+  log({ jid, dir: 'ai', text: null, adaGambar: images.length > 0, eskalasi: escalated, sebab: failed ? 'ai-gagal-total' : 'ai-berhasil', provider: answeredBy, model, percobaan: attempts, sebabDetail: reason })
   saveHistory()
 
   // Jika chat diambil alih oleh pemilik saat bot sedang retry, jangan kirim balasan bot lagi
@@ -240,11 +305,12 @@ async function processMessage(jid, items) {
   }
 
   // Jika semua model gagal (error atau kena limit harian), alihkan chat
-  // ke admin: pelanggan tetap dapat jawaban manusia.
+  // ke admin: pelanggan tetap dapat jawaban manusia. Di sini bot memang
+  // tidak bisa menjawab, jadi chat dijeda supaya admin tidak diganggu.
   if (failed) {
     takeover.pause(jid)
     await send(jid, HANDOVER_MESSAGE)
-    await notifyOwner(jid, text || '[gambar]', reason === 'quota-harian' ? 'quota' : 'handover')
+    await notifyOwner(jid, text || '[gambar]', reason === 'quota-harian' ? 'quota' : 'handover', number)
     return
   }
 
@@ -256,7 +322,18 @@ async function processMessage(jid, items) {
     if (i < chunks.length - 1) await sleep(limits.chunkDelaySec * 1000)
   }
 
-  if (escalated) await notifyOwner(jid, text || '[gambar]', 'pengetahuan')
+  // Eskalasi TIDAK mem-pause chat. Pelanggan yang bertanya harga akan
+  // dieskalasi hampir tiap kali; kalau bot lalu diam 30 menit, pertanyaan
+  // lanjutannya tidak pernah dijawab. Admin tetap bisa mengambil alih kapan
+  // saja dengan membalas manual — itu yang mem-pause bot.
+  //
+  // Balasan kosong beda: bot benar-benar tidak punya jawaban, pelanggan sudah
+  // diberi tahu admin akan membalas, jadi bot mundur dulu.
+  const kosong = !reply?.trim()
+  if (escalated || kosong) {
+    if (kosong) takeover.pause(jid)
+    await notifyOwner(jid, text || '[gambar]', 'pengetahuan', number)
+  }
 }
 
 // ---- Penanganan pesan ----------------------------------------------------
@@ -298,9 +375,16 @@ function handleMessages(event) {
       continue
     }
 
+    // Abaikan reaksi emoji, pesan ditarik/dihapus, dan pesan protokol lainnya tanpa mengirim error
+    if (isPassiveMessage(msg)) {
+      continue
+    }
+
     if (takeover.isPaused(jid)) continue
 
-    const number = jid.split('@')[0]
+    // WHITELIST berisi nomor HP, jadi harus dibandingkan dengan nomor HP —
+    // bukan ID internal `@lid` yang dipakai WhatsApp untuk chat sekarang.
+    const number = senderNumber(msg)
     if (config.access.mode === 'WHITELIST' && !config.access.whitelist.includes(number)) continue
 
     // Jika pesan bukan teks dan bukan gambar (misal voice note/audio, stiker, dokumen, video)
@@ -327,7 +411,7 @@ function handleMessages(event) {
 
     const text = extractText(msg)
     log({ jid, dir: 'in', text, adaGambar: Boolean(extractImage(msg)), eskalasi: false, sebab: null })
-    debouncer.add(jid, { text, image: extractImage(msg), msg })
+    debouncer.add(jid, { text, image: extractImage(msg), media: unreadableMedia(msg), msg })
   }
 }
 
@@ -339,11 +423,22 @@ let reconnecting = false
 const qrState = { status: 'starting', qr: null, qrAt: null }
 
 async function start() {
+  if (sock) {
+    try {
+      sock.ev.removeAllListeners('messages.upsert')
+      sock.ev.removeAllListeners('connection.update')
+      sock.ev.removeAllListeners('creds.update')
+      sock.end?.(undefined)
+    } catch {}
+  }
+
   const { state, saveCreds } = await useMultiFileAuthState('auth')
 
   sock = makeWASocket({
     auth: state,
     logger: LOGGER,
+    // Dipakai Baileys saat HP penerima gagal mendekripsi pesan kita.
+    getMessage: async (key) => recentSent.get(key.id)?.message,
     // Wajib false. Kalau bot menandai dirinya online, WhatsApp berhenti
     // mengirim push notification dan HP pemilik diam saat ada chat masuk —
     // padahal justru itu yang dibutuhkan untuk takeover manual.

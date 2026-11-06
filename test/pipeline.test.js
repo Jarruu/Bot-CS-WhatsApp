@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  extractText, extractImage, shouldIgnore, chunkText,
+  extractText, extractImage, isPassiveMessage, formatForWhatsApp, senderNumber, unreadableMedia, chunkText,
   createDebouncer, createRateLimiter, createSendGate, createQueue, createTakeover,
 } from '../pipeline.js'
 
@@ -27,13 +27,23 @@ test('gambar dikenali, non-gambar tidak', () => {
   assert.equal(extractImage({}), null)
 })
 
-test('grup, status, dan pesan tak didukung diabaikan; teks dan gambar lolos', () => {
-  assert.equal(shouldIgnore({ key: { remoteJid: 'g@g.us' }, message: { conversation: 'x' } }), true)
-  assert.equal(shouldIgnore({ key: { remoteJid: 'status@broadcast' }, message: { conversation: 'x' } }), true)
-  assert.equal(shouldIgnore({ key: { remoteJid: CHAT }, message: { stickerMessage: {} } }), true)
-  assert.equal(shouldIgnore({ key: { remoteJid: CHAT }, message: { audioMessage: {} } }), true)
-  assert.equal(shouldIgnore({ key: { remoteJid: CHAT }, message: { conversation: 'ok' } }), false)
-  assert.equal(shouldIgnore({ key: { remoteJid: CHAT }, message: IMG }), false)
+test('nomor HP diambil dari remoteJidAlt saat chat memakai LID', () => {
+  // WhatsApp kini mengirim chat sebagai `192105...@lid`. Angka itu tidak bisa
+  // dicari di WhatsApp dan tidak cocok dengan WHITELIST, jadi nomor aslinya
+  // harus diambil dari remoteJidAlt.
+  assert.equal(
+    senderNumber({ key: { remoteJid: '192105716707360@lid', remoteJidAlt: '6285188502894@s.whatsapp.net' } }),
+    '6285188502894',
+  )
+  assert.equal(senderNumber({ key: { remoteJid: '628@s.whatsapp.net' } }), '628')
+  assert.equal(senderNumber({ key: {} }), null)
+})
+
+test('dokumen dan video dikenali sebagai media yang tidak terbaca', () => {
+  assert.equal(unreadableMedia({ message: { documentMessage: { caption: 'ini' } } }), 'dokumen')
+  assert.equal(unreadableMedia({ message: { videoMessage: { caption: 'ini' } } }), 'video')
+  assert.equal(unreadableMedia({ message: { conversation: 'halo' } }), null)
+  assert.equal(unreadableMedia({ message: IMG }), null)
 })
 
 test('chunkText membagi teks panjang tanpa kehilangan karakter', () => {
@@ -61,13 +71,13 @@ test('gambar sekali-lihat dan chat menghilang tetap terbaca', () => {
     'ini apa',
   )
   assert.equal(
-    shouldIgnore({ key: { remoteJid: CHAT }, message: { viewOnceMessageV2: { message: img } } }),
-    false,
+    extractImage({ key: { remoteJid: CHAT }, message: { viewOnceMessageV2: { message: img } } })?.mimetype,
+    'image/jpeg',
   )
   // yang memang tak didukung tetap tak didukung
   assert.equal(
-    shouldIgnore({ key: { remoteJid: CHAT }, message: { viewOnceMessageV2: { message: { stickerMessage: {} } } } }),
-    true,
+    extractImage({ message: { viewOnceMessageV2: { message: { stickerMessage: {} } } } }),
+    null,
   )
 })
 
@@ -143,4 +153,21 @@ test('resume membatalkan pause takeover lebih cepat', () => {
   assert.equal(t.isPaused(CHAT), true)
   t.resume(CHAT)
   assert.equal(t.isPaused(CHAT), false)
+})
+
+test('teks caption dari dokumen dan video juga terbaca', () => {
+  assert.equal(extractText({ message: { documentMessage: { caption: 'ini file saya' } } }), 'ini file saya')
+  assert.equal(extractText({ message: { videoMessage: { caption: 'ini video instruksi' } } }), 'ini video instruksi')
+})
+
+test('isPassiveMessage mengenali reaksi emoji dan protocolMessage', () => {
+  assert.equal(isPassiveMessage({ message: { reactionMessage: { text: '👍' } } }), true)
+  assert.equal(isPassiveMessage({ message: { protocolMessage: { type: 0 } } }), true)
+  assert.equal(isPassiveMessage({ message: { conversation: 'halo' } }), false)
+  assert.equal(isPassiveMessage({ message: IMG }), false)
+})
+
+test('formatForWhatsApp mengubah **tebal** menjadi *tebal*', () => {
+  assert.equal(formatForWhatsApp('Ini **penting** banget'), 'Ini *penting* banget')
+  assert.equal(formatForWhatsApp('*sudah benar*'), '*sudah benar*')
 })

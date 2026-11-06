@@ -116,7 +116,8 @@ export function loadConfig(env = process.env) {
       rateOutMax: positive(env, 'RATE_OUT_MAX', 15),
       rateOutWindowSec: positive(env, 'RATE_OUT_WINDOW_SEC', 60),
       chunkDelaySec: num(env, 'CHUNK_DELAY_SEC', 1),
-      maxImageMb: num(env, 'MAX_IMAGE_MB', 5),
+      // Nol berarti bot menolak semua gambar tanpa penjelasan yang jelas.
+      maxImageMb: positive(env, 'MAX_IMAGE_MB', 5),
     },
   }
 }

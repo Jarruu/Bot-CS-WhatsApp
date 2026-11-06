@@ -21,6 +21,7 @@ function fakeFetch(replyText, { ok = true, status = 200, fails = 0 } = {}) {
     calls.push({
       url,
       authorization: init.headers.Authorization,
+      hasSignal: Boolean(init.signal),
       ...JSON.parse(init.body),
     })
     if (calls.length <= fails) return { ok: false, status, json: async () => ({}), text: async () => '' }
@@ -240,6 +241,25 @@ test('gambar dikirim sebagai data URI, dan memakai model bervisi', async () => {
   assert.equal(calls[0].url, `${BASE}/chat/completions`)
 })
 
+test('beberapa gambar sekaligus dikirim sebagai array image_url', async () => {
+  const { impl, calls } = fakeFetch('ok')
+  const ai = createAI({ config, knowledge: 'x', fetchImpl: impl })
+  await ai.ask({
+    jid: CHAT,
+    text: 'dua gambar',
+    images: [
+      { data: Buffer.from('img1'), mimetype: 'image/jpeg' },
+      { data: Buffer.from('img2'), mimetype: 'image/png' },
+    ],
+  })
+  const last = calls[0].messages.at(-1)
+  assert.equal(Array.isArray(last.content), true)
+  const imgs = last.content.filter((c) => c.type === 'image_url')
+  assert.equal(imgs.length, 2)
+  assert.match(imgs[0].image_url.url, /^data:image\/jpeg;base64,/)
+  assert.match(imgs[1].image_url.url, /^data:image\/png;base64,/)
+})
+
 test('riwayat bisa disimpan lalu dipulihkan setelah bot restart', async () => {
   const { impl } = fakeFetch('jawaban')
   const ai = createAI({ config, knowledge: 'KB', fetchImpl: impl })
@@ -271,6 +291,8 @@ test('penanda eskalasi tetap terbaca walau tidak di awal balasan', async () => {
   for (const mentah of [
     '**[[ESCALATE]]** Maaf, aku tanyakan dulu ke admin ya.',
     'Baik, aku teruskan ke admin dulu. [[ESCALATE]]',
+    '[[escalate]] Maaf kak, dicek admin dulu ya.',
+    '[ESCALATE] Maaf kak, dicek admin dulu ya.',
   ]) {
     const ai = createAI({ config, knowledge: 'x', fetchImpl: fakeFetch(mentah).impl })
     const res = await ai.ask({ jid: CHAT, text: 'ada diskon?' })
@@ -280,26 +302,58 @@ test('penanda eskalasi tetap terbaca walau tidak di awal balasan', async () => {
   }
 })
 
-test('pertanyaan berulang dijawab dari cache tanpa memanggil provider lagi', async () => {
-  const { impl, calls } = fakeFetch('Buka jam 8 pagi sampai 11 malam yaa kak')
+test('pertanyaan yang sama dari chat lain TIDAK dijawab dari cache', async () => {
+  // Cache lintas chat pernah membuat balasan milik satu pelanggan terkirim ke
+  // pelanggan lain, karena balasannya dibuat dengan riwayat chat pengirim.
+  const { impl, calls } = fakeFetch('jawaban')
   const ai = createAI({ config, knowledge: 'x', fetchImpl: impl })
-  const first = await ai.ask({ jid: CHAT, text: 'Jam buka?' })
-  const second = await ai.ask({ jid: 'b@s.whatsapp.net', text: 'jam buka' })
-  assert.equal(calls.length, 1, 'pertanyaan yang sama dari chat lain tidak memanggil LLM')
-  assert.equal(second.reply, first.reply)
-  assert.equal(second.answeredBy, 'cache')
-  assert.equal(second.attempts, 0)
+  await ai.ask({ jid: CHAT, text: 'jam buka?' })
+  await ai.ask({ jid: 'b@s.whatsapp.net', text: 'jam buka?' })
+  assert.equal(calls.length, 2, 'tiap chat harus dapat jawaban dari riwayatnya sendiri')
 })
 
-test('pertanyaan pendek dan pesan panjang tidak di-cache: jawabannya bergantung konteks', async () => {
+test('permintaan ke provider punya batas waktu', async () => {
   const { impl, calls } = fakeFetch('ok')
   const ai = createAI({ config, knowledge: 'x', fetchImpl: impl })
-  const panjang = 'aku butuh makalah tentang sejarah indonesia 10 halaman deadline besok'
-  await ai.ask({ jid: CHAT, text: 'iya' })
-  await ai.ask({ jid: CHAT, text: 'iya' })
-  await ai.ask({ jid: CHAT, text: panjang })
-  await ai.ask({ jid: CHAT, text: panjang })
-  assert.equal(calls.length, 4)
+  await ai.ask({ jid: CHAT, text: 'halo' })
+  assert.equal(calls[0].hasSignal, true, 'tanpa AbortSignal, request macet menghentikan antrian chat')
+})
+
+test('kuota harian dicoba lagi setelah cooldown lewat', async () => {
+  // Cooldown memakai jam yang hanya maju saat bot menunggu. Tanpa menyusul
+  // jam nyata, model tidak pernah dicoba lagi sampai bot di-restart.
+  let limited = true
+  const impl = async () => limited
+    ? { ok: false, status: 429, json: async () => ({}), text: async () => '{"quotaMetric":"GenerateRequestsPerDayPerProjectPerModel"}' }
+    : { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: 'halo kak' } }] }) }
+  const ai = createAI({ config, knowledge: 'x', fetchImpl: impl })
+  const first = await ai.ask({ jid: CHAT, text: 'halo' })
+  assert.equal(first.reason, 'quota-harian')
+
+  limited = false
+  const realNow = Date.now
+  Date.now = () => realNow() + 2 * 60 * 60 * 1000 // kuota Google sudah direset
+  try {
+    const second = await ai.ask({ jid: CHAT, text: 'halo lagi' })
+    assert.equal(second.failed, false, 'model harus dicoba lagi setelah cooldown lewat')
+    assert.equal(second.reply, 'halo kak')
+  } finally {
+    Date.now = realNow
+  }
+})
+
+test('error 4xx tidak diulang berulang kali', async () => {
+  // API key salah (401) tidak akan sembuh dengan diulang 5x dan menahan
+  // pelanggan ±25 detik.
+  let n = 0
+  const impl = async () => {
+    n++
+    return { ok: false, status: 401, json: async () => ({}), text: async () => 'unauthorized' }
+  }
+  const ai = createAI({ config, knowledge: 'x', fetchImpl: impl, retryDelayMs: 0 })
+  const res = await ai.ask({ jid: CHAT, text: 'halo' })
+  assert.equal(res.failed, true)
+  assert.equal(n, 2, 'satu putaran chain saja, bukan enam percobaan')
 })
 
 test('jawaban eskalasi tidak di-cache, pertanyaan berikutnya tetap dicek', async () => {

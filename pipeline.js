@@ -34,7 +34,43 @@ function unwrap(message) {
 export function extractText(msg) {
   const m = unwrap(msg?.message)
   if (!m) return null
-  return m.conversation ?? m.extendedTextMessage?.text ?? m.imageMessage?.caption ?? null
+  return (
+    m.conversation ??
+    m.extendedTextMessage?.text ??
+    m.imageMessage?.caption ??
+    m.documentMessage?.caption ??
+    m.videoMessage?.caption ??
+    null
+  )
+}
+
+/** Tipe pesan pasif/sistem yang tidak boleh memicu peringatan media tak didukung. */
+const PASSIVE_TYPES = [
+  'reactionMessage',
+  'protocolMessage',
+  'pollUpdateMessage',
+  'senderKeyDistributionMessage',
+  'keepInChatMessage',
+]
+
+/**
+ * Cek apakah pesan berupa event pasif (misal reaksi emoji, pesan ditarik/dihapus,
+ * atau sinkronisasi protokol) yang harus diabaikan tanpa mengirim pesan error.
+ */
+export function isPassiveMessage(msg) {
+  const raw = msg?.message
+  if (!raw) return true
+  const m = unwrap(raw) ?? raw
+  return PASSIVE_TYPES.some((type) => Boolean(m[type]))
+}
+
+/**
+ * Format markdown standar agar cocok untuk WhatsApp:
+ * Mengubah **tebal** menjadi *tebal*.
+ */
+export function formatForWhatsApp(text) {
+  if (!text) return ''
+  return text.replace(/\*\*(.*?)\*\*/g, '*$1*')
 }
 
 /** Node gambar dari pesan, atau null. Node-nya dipakai index.js untuk unduh. */
@@ -43,17 +79,27 @@ export function extractImage(msg) {
 }
 
 /**
- * Buang apa pun yang bukan percakapan satu-lawan-satu berisi teks atau
- * gambar: grup, status broadcast, dan pesan tak didukung seperti stiker,
- * audio, video, dan dokumen.
+ * Nomor HP pengirim, bukan ID internal. WhatsApp kini mengirim chat sebagai
+ * `192105...@lid` — angka itu tidak bisa dicari di WhatsApp dan tidak cocok
+ * dengan WHITELIST. Nomor aslinya ada di `remoteJidAlt`.
  */
-export function shouldIgnore(msg) {
+export function senderNumber(msg) {
   const jid = msg?.key?.remoteJid
-  if (!jid) return true
-  if (jid.endsWith('@g.us')) return true
-  if (jid === 'status@broadcast') return true
-  if (!extractText(msg) && !extractImage(msg)) return true
-  return false
+  if (!jid) return null
+  const jidBerNomor = jid.endsWith('@lid') && msg.key.remoteJidAlt ? msg.key.remoteJidAlt : jid
+  return jidBerNomor.split('@')[0]
+}
+
+/**
+ * Media yang teksnya terbaca tapi isinya tidak: dokumen dan video. Bot harus
+ * memberi tahu model bahwa lampirannya tidak dibaca, supaya jawabannya tidak
+ * berpura-pura sudah melihat isi file.
+ */
+export function unreadableMedia(msg) {
+  const m = unwrap(msg?.message)
+  if (m?.documentMessage) return 'dokumen'
+  if (m?.videoMessage) return 'video'
+  return null
 }
 
 /**
@@ -122,6 +168,20 @@ export function createRateLimiter({ max, windowMs, cooldownMs }) {
     /** true = boleh diproses. */
     check(jid) {
       const now = Date.now()
+
+      // Pruning berkala jika entri terlalu banyak untuk mencegah kebocoran memori
+      if (hits.size > 1000) {
+        for (const [key, timestamps] of hits.entries()) {
+          const fresh = timestamps.filter((t) => now - t < windowMs)
+          if (!fresh.length) hits.delete(key)
+          else hits.set(key, fresh)
+        }
+      }
+      if (blockedUntil.size > 1000) {
+        for (const [key, until] of blockedUntil.entries()) {
+          if (now >= until) blockedUntil.delete(key)
+        }
+      }
 
       const until = blockedUntil.get(jid)
       if (until !== undefined) {
@@ -198,15 +258,20 @@ export function createQueue() {
  * chat-nya sendiri dan berhenti menjawab pelanggan tanpa suara.
  */
 export function createTakeover({ pauseMs = 600_000 } = {}) {
-  // ponytail: Set ini tumbuh seumur proses. Beberapa ribu string per bulan
-  // tidak masalah; pindah ke ring buffer kalau botnya sampai puluhan ribu
-  // pesan sehari.
+  // Batasi Set maksimal 5000 ID agar tidak bertambah tanpa batas di memori
+  const MAX_TRACK = 5000
   const sentByBot = new Set()
   const pausedUntil = new Map()
 
   return {
     noteSent(id) {
-      if (id) sentByBot.add(id)
+      if (id) {
+        if (sentByBot.size >= MAX_TRACK) {
+          const oldest = sentByBot.values().next().value
+          sentByBot.delete(oldest)
+        }
+        sentByBot.add(id)
+      }
     },
     isOwn(id) {
       return sentByBot.has(id)
